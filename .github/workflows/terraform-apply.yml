@@ -1,5 +1,5 @@
 name: Terraform Apply (LocalStack, sin coste)
- 
+
 on:
   workflow_dispatch:
     inputs:
@@ -9,20 +9,20 @@ on:
         default: 'dev'
         type: choice
         options: [dev, prod]
- 
+
 permissions:
   contents: read
- 
+
 env:
   TF_VERSION: "1.7.5"
   TF_WORKING_DIR: environments/${{ inputs.environment }}
- 
+
 jobs:
   apply-localstack:
     name: Terraform Apply contra LocalStack
     runs-on: ubuntu-latest
     timeout-minutes: 30
- 
+
     services:
       localstack:
         image: localstack/localstack:3.0
@@ -34,23 +34,23 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
- 
+
     # Credenciales ficticias: LocalStack no valida su contenido,
     # solo necesita que existan variables con este nombre.
     env:
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
       AWS_DEFAULT_REGION: eu-west-1
- 
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
- 
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
- 
+
       - name: Esperar a que LocalStack esté listo
         run: |
           for i in $(seq 1 20); do
@@ -58,14 +58,51 @@ jobs:
             echo "Esperando LocalStack ($i/20)..."
             sleep 3
           done
- 
-      - name: Instalar override de endpoints LocalStack
-        run: cp localstack/localstack.override.tf ${{ env.TF_WORKING_DIR }}/localstack_override.tf
- 
+
+      - name: Generar override de endpoints LocalStack
+        run: |
+          cat > ${{ env.TF_WORKING_DIR }}/localstack_override.tf <<'EOF'
+          provider "aws" {
+            access_key = "test"
+            secret_key = "test"
+
+            skip_credentials_validation = true
+            skip_metadata_api_check     = true
+            skip_requesting_account_id  = true
+
+            s3_use_path_style = true
+
+            endpoints {
+              acm            = "http://localhost:4566"
+              apigateway     = "http://localhost:4566"
+              cloudwatch     = "http://localhost:4566"
+              cloudwatchlogs = "http://localhost:4566"
+              cloudtrail     = "http://localhost:4566"
+              config         = "http://localhost:4566"
+              dlm            = "http://localhost:4566"
+              dynamodb       = "http://localhost:4566"
+              ec2            = "http://localhost:4566"
+              elbv2          = "http://localhost:4566"
+              events         = "http://localhost:4566"
+              guardduty      = "http://localhost:4566"
+              iam            = "http://localhost:4566"
+              kms            = "http://localhost:4566"
+              lambda         = "http://localhost:4566"
+              rds            = "http://localhost:4566"
+              s3             = "http://localhost:4566"
+              scheduler      = "http://localhost:4566"
+              secretsmanager = "http://localhost:4566"
+              sns            = "http://localhost:4566"
+              ssm            = "http://localhost:4566"
+              wafv2          = "http://localhost:4566"
+            }
+          }
+          EOF
+
       - name: Terraform Init (sin backend remoto)
         run: terraform init -backend=false -input=false
         working-directory: ${{ env.TF_WORKING_DIR }}
- 
+
       - name: Terraform Plan
         run: |
           terraform plan \
@@ -76,18 +113,18 @@ jobs:
             -var="alarm_email=test@empresa.com" \
             -var="internal_domain=empresa.internal"
         working-directory: ${{ env.TF_WORKING_DIR }}
- 
+
       - name: Terraform Apply (contra LocalStack)
         run: |
           terraform apply -no-color -input=false -auto-approve tfplan \
             2>&1 | tee /tmp/apply-output.txt
         working-directory: ${{ env.TF_WORKING_DIR }}
- 
+
       - name: Extraer outputs
         if: success()
         run: terraform output -json > /tmp/tf-outputs.json
         working-directory: ${{ env.TF_WORKING_DIR }}
- 
+
       - name: Subir evidencia (log de apply + outputs)
         if: always()
         uses: actions/upload-artifact@v4
@@ -97,7 +134,7 @@ jobs:
             /tmp/apply-output.txt
             /tmp/tf-outputs.json
           retention-days: 30
- 
+
       - name: Aviso de limitaciones
         if: always()
         run: |
