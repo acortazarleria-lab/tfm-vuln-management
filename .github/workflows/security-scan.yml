@@ -49,7 +49,7 @@ jobs:
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'image'
-          image-ref: 'defectdojo/defectdojo-django:${{ vars.DEFECTDOJO_VERSION }}'
+          image-ref: 'defectdojo/defectdojo-django:latest'
           format: 'sarif'
           output: '/tmp/trivy-image.sarif'
           severity: 'MEDIUM,HIGH,CRITICAL'
