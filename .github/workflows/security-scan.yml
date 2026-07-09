@@ -155,15 +155,30 @@ jobs:
           path: semgrep.sarif
           retention-days: 30
 
-  # ── Job 4: DAST — OWASP ZAP ─────────────────────────────
+  check-target:
+    name: Comprobar disponibilidad de target DAST
+    runs-on: ubuntu-latest
+    outputs:
+      has-target: ${{ steps.check.outputs.has-target }}
+    steps:
+      - id: check
+        run: |
+          if [ -n "${{ secrets.DEFECTDOJO_APP_URL }}" ]; then
+            echo "has-target=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has-target=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::DEFECTDOJO_APP_URL no está configurado; el job dast-zap se omitirá."
+          fi
+
   dast-zap:
     name: OWASP ZAP DAST → DefectDojo
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    if: github.ref == 'refs/heads/main' || github.event_name == 'schedule'
+    needs: check-target
+    if: (github.ref == 'refs/heads/main' || github.event_name == 'schedule') && needs.check-target.outputs.has-target == 'true'
     steps:
       - uses: actions/checkout@v4
-
+ 
       - name: OWASP ZAP Baseline Scan
         uses: zaproxy/action-baseline@v0.12.0
         with:
@@ -175,7 +190,38 @@ jobs:
                 -config spider.maxChildren=20"
           fail_action: false
           allow_issue_writing: false
-
+ 
+      - name: Upload ZAP report → DefectDojo (best-effort)
+        if: always()
+        continue-on-error: true
+        env:
+          DD_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+          DD_BASE_URL: ${{ secrets.DEFECTDOJO_URL }}
+          DEFECTDOJO_APP_URL: ${{ secrets.DEFECTDOJO_APP_URL }}
+        run: |
+          pip install requests -q
+          python3 << 'PYTHON'
+          import os, datetime, glob, requests
+          reports=glob.glob('*zap*.xml')+glob.glob('report_xml.xml')
+          if not reports:
+              print("No se encontró reporte ZAP"); raise SystemExit(0)
+          DD_TOKEN=os.environ['DD_API_KEY']; DD_BASE_URL=os.environ['DD_BASE_URL']
+          TODAY=datetime.date.today().isoformat()
+          hdr={"Authorization": f"Token {DD_TOKEN}"}
+          res=requests.get(f"{DD_BASE_URL}/api/v2/engagements/", headers=hdr,
+                params={"name":"DAST Continuous Scan","status":"In Progress"}, timeout=20).json().get('results',[])
+          if not res:
+              print("ERROR: Engagement DAST no encontrado"); raise SystemExit(0)
+          eng=res[0]['id']
+          with open(reports[0],'rb') as f:
+              r=requests.post(f"{DD_BASE_URL}/api/v2/import-scan/", headers=hdr,
+                    data={"scan_type":"ZAP Scan","engagement":eng,"active":True,"verified":False,
+                          "scan_date":TODAY,"tags":"zap,dast,baseline","close_old_findings":True,
+                          "minimum_severity":"Medium","endpoint_to_add":os.environ.get('DEFECTDOJO_APP_URL','')},
+                    files={"file":("zap-report.xml", f, "application/xml")}, timeout=60)
+          print(("OK" if r.status_code in (200,201) else "ERROR"), "ZAP→DD", r.status_code)
+          PYTHON
+ 
       - name: ZAP report como artifact
         uses: actions/upload-artifact@v4
         if: always()
