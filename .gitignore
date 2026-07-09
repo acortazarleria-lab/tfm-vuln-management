@@ -4,7 +4,7 @@ localstack/volume/
 localstack/plan-output.txt
 localstack/tfplan.out
 localstack/checkov-output.txt
-localstack.override.tf
+/localstack.override.tf
 
 # Terraform
 **/.terraform/*
