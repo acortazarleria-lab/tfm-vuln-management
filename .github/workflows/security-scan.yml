@@ -108,44 +108,6 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - run: pip install requests boto3
 
-      # SOLO los SBOM de app/imagen (SCA) van a DefectDojo. Best-effort.
-      - name: Upload SCA results → DefectDojo (best-effort)
-        continue-on-error: true
-        env:
-          DD_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
-          DD_BASE_URL: ${{ secrets.DEFECTDOJO_URL }}
-        run: |
-          python3 << 'PYTHON'
-          import os, datetime, requests
-          DD_TOKEN = os.environ['DD_API_KEY']; DD_BASE_URL = os.environ['DD_BASE_URL']
-          HEADERS = {"Authorization": f"Token {DD_TOKEN}"}
-          TODAY = datetime.date.today().isoformat()
-          BRANCH = os.environ.get('GITHUB_REF_NAME', 'main')
-
-          def get_engagement(name):
-              r = requests.get(f"{DD_BASE_URL}/api/v2/engagements/", headers=HEADERS,
-                               params={"name": name, "status": "In Progress"}, timeout=20)
-              res = r.json().get('results', [])
-              if not res: raise ValueError(f"Engagement '{name}' no encontrado")
-              return res[0]['id']
-
-          def import_scan(eng_id, path, scan_type, tags):
-              if not os.path.exists(path):
-                  print(f"Archivo no encontrado: {path}"); return
-              with open(path, 'rb') as f:
-                  r = requests.post(f"{DD_BASE_URL}/api/v2/import-scan/", headers=HEADERS,
-                      data={"scan_type": scan_type, "engagement": eng_id, "active": True,
-                            "verified": False, "scan_date": TODAY, "tags": tags,
-                            "close_old_findings": True, "minimum_severity": "Medium"},
-                      files={"file": (os.path.basename(path), f, "application/json")}, timeout=60)
-              print(("OK" if r.status_code in (200,201) else "ERROR"), scan_type, tags, r.status_code)
-
-          # Solo el SBOM de filesystem (dependencias del código). La
-          # imagen de DefectDojo ya NO se reporta aquí → GitHub Security.
-          sca = get_engagement("SCA Dependency Scan")
-          import_scan(sca, "/tmp/trivy-fs-sbom.json", "CycloneDX Scan", f"trivy,sca,filesystem,{BRANCH}")
-          PYTHON
-
       # Fallback: los findings sobreviven aunque DefectDojo esté caído.
       - name: Trivy findings como artifact
         uses: actions/upload-artifact@v4
@@ -189,39 +151,6 @@ jobs:
 
       - name: Wait for DTrack analysis
         run: sleep 60
-
-      - name: Export DTrack findings → DefectDojo (best-effort)
-        continue-on-error: true
-        env:
-          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
-          DTRACK_URL: ${{ secrets.DTRACK_URL }}
-          DD_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
-          DD_BASE_URL: ${{ secrets.DEFECTDOJO_URL }}
-          DTRACK_PROJECT_APP_UUID: ${{ vars.DTRACK_PROJECT_APP_UUID }}
-        run: |
-          pip install requests -q
-          python3 << 'PYTHON'
-          import os, datetime, requests
-          DTRACK_KEY=os.environ['DTRACK_API_KEY']; DTRACK_URL=os.environ['DTRACK_URL']
-          DD_TOKEN=os.environ['DD_API_KEY']; DD_BASE_URL=os.environ['DD_BASE_URL']
-          PROJECT_UUID=os.environ.get('DTRACK_PROJECT_APP_UUID',''); TODAY=datetime.date.today().isoformat()
-
-          resp=requests.get(f"{DTRACK_URL}/api/v1/bom/cyclonedx/project/{PROJECT_UUID}",
-                headers={"X-Api-Key": DTRACK_KEY},
-                params={"format":"JSON","variant":"withVulnerabilities"}, timeout=60)
-          resp.raise_for_status(); sbom=resp.content
-          with open('/tmp/dtrack-sbom.json','wb') as f: f.write(sbom)
-
-          hdr={"Authorization": f"Token {DD_TOKEN}"}
-          eng=requests.get(f"{DD_BASE_URL}/api/v2/engagements/", headers=hdr,
-                params={"name":"SCA Dependency Scan","status":"In Progress"}, timeout=20).json()['results'][0]['id']
-          r=requests.post(f"{DD_BASE_URL}/api/v2/import-scan/", headers=hdr,
-                data={"scan_type":"CycloneDX Scan","engagement":eng,"active":True,"verified":False,
-                      "scan_date":TODAY,"tags":"dependency-track,sca,cyclonedx",
-                      "close_old_findings":True,"minimum_severity":"Medium"},
-                files={"file":("dtrack-sbom.json", sbom, "application/json")}, timeout=60)
-          print(("OK" if r.status_code in (200,201) else "ERROR"), "DTrack→DD", r.status_code)
-          PYTHON
 
       - name: DTrack SBOM como artifact
         uses: actions/upload-artifact@v4
