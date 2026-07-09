@@ -1,0 +1,48 @@
+# LocalStack
+localstack/bin/
+localstack/volume/
+localstack/plan-output.txt
+localstack/tfplan.out
+localstack/checkov-output.txt
+localstack.override.tf
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+.terraform.lock.hcl
+
+# Variables con secretos reales (mantener solo *.tfvars.example si se añade)
+*.auto.tfvars
+secrets.tfvars
+
+# Lambda build artifacts
+modules/defectdojo/lambda/*.zip
+modules/defectdojo/lambda/layer/python/
+modules/defectdojo/lambda/layer/python-deps.zip
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Compliance reports generados localmente
+compliance-*.json
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+*.swp

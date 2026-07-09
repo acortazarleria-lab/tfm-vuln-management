@@ -1,0 +1,369 @@
+# ============================================================
+# security-scan.yml
+# Trigger: push a main/develop + schedule diario
+# Escaneo continuo de la PLATAFORMA (producto DefectDojo):
+#   Trivy (SCA/vuln), Dependency-Track (SBOM), Semgrep (SAST),
+#   OWASP ZAP (DAST).
+#
+# CAMBIOS vs versión previa (rompen la circularidad):
+#  - Los findings de IaC (Trivy config sobre Terraform) YA NO van a
+#    DefectDojo: la IaC de la plataforma no se reporta contra la
+#    plataforma que ella misma despliega. Van a GitHub Security
+#    (SARIF) + artifact. (La IaC ya la gobierna terraform-validate.yml.)
+#  - CIRCULARIDAD CERO: el scan de la IMAGEN de DefectDojo también
+#    va ahora a GitHub Security (SARIF), NO a DefectDojo. La
+#    plataforma ya no reporta ninguna de sus propias vulnerabilidades
+#    (imagen + IaC) contra sí misma.
+#  - Lo que SÍ sigue en DefectDojo (best-effort + artifact fallback):
+#    SCA de dependencias del código (filesystem), Dependency-Track,
+#    Semgrep SAST y ZAP DAST contra la app en ejecución. Es el
+#    propósito legítimo del producto y NO es autorreferencial a su
+#    propia construcción. Si DefectDojo está caído, el escaneo no
+#    rompe y los findings sobreviven como artifact.
+#
+#  Reparto de destinos:
+#    GitHub Security ← IaC (Trivy config) + imagen DefectDojo
+#    DefectDojo      ← SCA código + DTrack + SAST + DAST (best-effort)
+# ============================================================
+
+name: Security Scan → DefectDojo
+
+on:
+  push:
+    branches: [main, develop]
+  schedule:
+    - cron: '0 6 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+env:
+  AWS_REGION: "eu-west-1"
+  PYTHON_VERSION: "3.12"
+  TARGET_URL: ${{ secrets.DEFECTDOJO_APP_URL }}
+
+jobs:
+  # ── Job 1: Trivy ─────────────────────────────────────────
+  trivy-scan:
+    name: Trivy SCA + IaC
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Trivy — Filesystem scan (SBOM)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'cyclonedx'
+          output: '/tmp/trivy-fs-sbom.json'
+          severity: 'MEDIUM,HIGH,CRITICAL'
+          ignore-unfixed: false
+          exit-code: '0'
+
+      # Scan de la imagen del propio DefectDojo → SARIF a GitHub
+      # Security (NO a DefectDojo). Rompe la última circularidad:
+      # la plataforma ya no reporta sus propias vulns contra sí misma.
+      - name: Trivy — Docker image scan (SARIF, no DefectDojo)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'image'
+          image-ref: 'defectdojo/defectdojo-django:${{ vars.DEFECTDOJO_VERSION }}'
+          format: 'sarif'
+          output: '/tmp/trivy-image.sarif'
+          severity: 'MEDIUM,HIGH,CRITICAL'
+          exit-code: '0'
+
+      - name: Upload image SARIF → GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: /tmp/trivy-image.sarif
+          category: trivy-image
+
+      # IaC: ahora en formato SARIF, NO CycloneDX/JSON hacia DD.
+      - name: Trivy — IaC scan (SARIF, no DefectDojo)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          scan-ref: '.'
+          format: 'sarif'
+          output: '/tmp/trivy-iac.sarif'
+          severity: 'MEDIUM,HIGH,CRITICAL'
+          exit-code: '0'
+
+      # Los findings de IaC van a GitHub Security, NO a DefectDojo.
+      - name: Upload IaC SARIF → GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: /tmp/trivy-iac.sarif
+          category: trivy-iac
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install requests boto3
+
+      # SOLO los SBOM de app/imagen (SCA) van a DefectDojo. Best-effort.
+      - name: Upload SCA results → DefectDojo (best-effort)
+        continue-on-error: true
+        env:
+          DD_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+          DD_BASE_URL: ${{ secrets.DEFECTDOJO_URL }}
+        run: |
+          python3 << 'PYTHON'
+          import os, datetime, requests
+          DD_TOKEN = os.environ['DD_API_KEY']; DD_BASE_URL = os.environ['DD_BASE_URL']
+          HEADERS = {"Authorization": f"Token {DD_TOKEN}"}
+          TODAY = datetime.date.today().isoformat()
+          BRANCH = os.environ.get('GITHUB_REF_NAME', 'main')
+
+          def get_engagement(name):
+              r = requests.get(f"{DD_BASE_URL}/api/v2/engagements/", headers=HEADERS,
+                               params={"name": name, "status": "In Progress"}, timeout=20)
+              res = r.json().get('results', [])
+              if not res: raise ValueError(f"Engagement '{name}' no encontrado")
+              return res[0]['id']
+
+          def import_scan(eng_id, path, scan_type, tags):
+              if not os.path.exists(path):
+                  print(f"Archivo no encontrado: {path}"); return
+              with open(path, 'rb') as f:
+                  r = requests.post(f"{DD_BASE_URL}/api/v2/import-scan/", headers=HEADERS,
+                      data={"scan_type": scan_type, "engagement": eng_id, "active": True,
+                            "verified": False, "scan_date": TODAY, "tags": tags,
+                            "close_old_findings": True, "minimum_severity": "Medium"},
+                      files={"file": (os.path.basename(path), f, "application/json")}, timeout=60)
+              print(("OK" if r.status_code in (200,201) else "ERROR"), scan_type, tags, r.status_code)
+
+          # Solo el SBOM de filesystem (dependencias del código). La
+          # imagen de DefectDojo ya NO se reporta aquí → GitHub Security.
+          sca = get_engagement("SCA Dependency Scan")
+          import_scan(sca, "/tmp/trivy-fs-sbom.json", "CycloneDX Scan", f"trivy,sca,filesystem,{BRANCH}")
+          PYTHON
+
+      # Fallback: los findings sobreviven aunque DefectDojo esté caído.
+      - name: Trivy findings como artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-findings
+          path: |
+            /tmp/trivy-fs-sbom.json
+            /tmp/trivy-image.sarif
+            /tmp/trivy-iac.sarif
+          retention-days: 30
+
+  # ── Job 2: Dependency-Track SBOM ─────────────────────────
+  dependency-track:
+    name: Dependency-Track SBOM → DefectDojo
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: trivy-scan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          pip install cyclonedx-bom requests
+          cyclonedx-py environment --output-format JSON --outfile /tmp/project-sbom.json
+
+      - name: Upload SBOM → Dependency-Track API
+        env:
+          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
+          DTRACK_URL: ${{ secrets.DTRACK_URL }}
+        run: |
+          PROJECT_UUID="${{ vars.DTRACK_PROJECT_APP_UUID }}"
+          SBOM_B64=$(base64 -w 0 /tmp/project-sbom.json)
+          curl -sf -X PUT "$DTRACK_URL/api/v1/bom" \
+            -H "X-Api-Key: $DTRACK_API_KEY" -H "Content-Type: application/json" \
+            -d "{\"project\": \"$PROJECT_UUID\", \"bom\": \"$SBOM_B64\"}"
+          echo "SBOM subido a Dependency-Track"
+
+      - name: Wait for DTrack analysis
+        run: sleep 60
+
+      - name: Export DTrack findings → DefectDojo (best-effort)
+        continue-on-error: true
+        env:
+          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
+          DTRACK_URL: ${{ secrets.DTRACK_URL }}
+          DD_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+          DD_BASE_URL: ${{ secrets.DEFECTDOJO_URL }}
+          DTRACK_PROJECT_APP_UUID: ${{ vars.DTRACK_PROJECT_APP_UUID }}
+        run: |
+          pip install requests -q
+          python3 << 'PYTHON'
+          import os, datetime, requests
+          DTRACK_KEY=os.environ['DTRACK_API_KEY']; DTRACK_URL=os.environ['DTRACK_URL']
+          DD_TOKEN=os.environ['DD_API_KEY']; DD_BASE_URL=os.environ['DD_BASE_URL']
+          PROJECT_UUID=os.environ.get('DTRACK_PROJECT_APP_UUID',''); TODAY=datetime.date.today().isoformat()
+
+          resp=requests.get(f"{DTRACK_URL}/api/v1/bom/cyclonedx/project/{PROJECT_UUID}",
+                headers={"X-Api-Key": DTRACK_KEY},
+                params={"format":"JSON","variant":"withVulnerabilities"}, timeout=60)
+          resp.raise_for_status(); sbom=resp.content
+          with open('/tmp/dtrack-sbom.json','wb') as f: f.write(sbom)
+
+          hdr={"Authorization": f"Token {DD_TOKEN}"}
+          eng=requests.get(f"{DD_BASE_URL}/api/v2/engagements/", headers=hdr,
+                params={"name":"SCA Dependency Scan","status":"In Progress"}, timeout=20).json()['results'][0]['id']
+          r=requests.post(f"{DD_BASE_URL}/api/v2/import-scan/", headers=hdr,
+                data={"scan_type":"CycloneDX Scan","engagement":eng,"active":True,"verified":False,
+                      "scan_date":TODAY,"tags":"dependency-track,sca,cyclonedx",
+                      "close_old_findings":True,"minimum_severity":"Medium"},
+                files={"file":("dtrack-sbom.json", sbom, "application/json")}, timeout=60)
+          print(("OK" if r.status_code in (200,201) else "ERROR"), "DTrack→DD", r.status_code)
+          PYTHON
+
+      - name: DTrack SBOM como artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dtrack-sbom
+          path: /tmp/dtrack-sbom.json
+          retention-days: 30
+
+  # ── Job 3: SAST — Semgrep ────────────────────────────────
+  sast-semgrep:
+    name: Semgrep SAST → DefectDojo
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Semgrep
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: >
+            p/python
+            p/terraform
+            p/secrets
+            p/docker-compose
+          generateSarif: "1"
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+        continue-on-error: true
+
+      - name: Upload Semgrep SARIF → GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+      - name: Upload Semgrep → DefectDojo (best-effort)
+        if: always()
+        continue-on-error: true
+        env:
+          DD_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+          DD_BASE_URL: ${{ secrets.DEFECTDOJO_URL }}
+        run: |
+          pip install requests -q
+          python3 << 'PYTHON'
+          import os, datetime, requests
+          if not os.path.exists('semgrep.sarif'):
+              print("No se encontró semgrep.sarif"); raise SystemExit(0)
+          DD_TOKEN=os.environ['DD_API_KEY']; DD_BASE_URL=os.environ['DD_BASE_URL']
+          TODAY=datetime.date.today().isoformat(); BRANCH=os.environ.get('GITHUB_REF_NAME','main')
+          hdr={"Authorization": f"Token {DD_TOKEN}"}
+          eng=requests.get(f"{DD_BASE_URL}/api/v2/engagements/", headers=hdr,
+                params={"name":"SAST Continuous Scan","status":"In Progress"}, timeout=20).json()['results'][0]['id']
+          with open('semgrep.sarif','rb') as f:
+              r=requests.post(f"{DD_BASE_URL}/api/v2/import-scan/", headers=hdr,
+                    data={"scan_type":"SARIF","engagement":eng,"active":True,"verified":False,
+                          "scan_date":TODAY,"tags":f"semgrep,sast,{BRANCH}",
+                          "close_old_findings":True,"minimum_severity":"Medium"},
+                    files={"file":("semgrep.sarif", f, "application/json")}, timeout=60)
+          print(("OK" if r.status_code in (200,201) else "ERROR"), "Semgrep→DD", r.status_code)
+          PYTHON
+
+      - name: Semgrep SARIF como artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: semgrep-sarif
+          path: semgrep.sarif
+          retention-days: 30
+
+  # ── Job 4: DAST — OWASP ZAP ─────────────────────────────
+  dast-zap:
+    name: OWASP ZAP DAST → DefectDojo
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.ref == 'refs/heads/main' || github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: OWASP ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: ${{ env.TARGET_URL }}
+          rules_file_name: '.zap/rules.tsv'
+          cmd_options: >
+            -z "-config scanner.maxScanDurationInMins=10
+                -config spider.maxDepth=5
+                -config spider.maxChildren=20"
+          fail_action: false
+          allow_issue_writing: false
+
+      - name: Upload ZAP report → DefectDojo (best-effort)
+        if: always()
+        continue-on-error: true
+        env:
+          DD_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+          DD_BASE_URL: ${{ secrets.DEFECTDOJO_URL }}
+          DEFECTDOJO_APP_URL: ${{ secrets.DEFECTDOJO_APP_URL }}
+        run: |
+          pip install requests -q
+          python3 << 'PYTHON'
+          import os, datetime, glob, requests
+          reports=glob.glob('*zap*.xml')+glob.glob('report_xml.xml')
+          if not reports:
+              print("No se encontró reporte ZAP"); raise SystemExit(0)
+          DD_TOKEN=os.environ['DD_API_KEY']; DD_BASE_URL=os.environ['DD_BASE_URL']
+          TODAY=datetime.date.today().isoformat()
+          hdr={"Authorization": f"Token {DD_TOKEN}"}
+          res=requests.get(f"{DD_BASE_URL}/api/v2/engagements/", headers=hdr,
+                params={"name":"DAST Continuous Scan","status":"In Progress"}, timeout=20).json().get('results',[])
+          if not res:
+              print("ERROR: Engagement DAST no encontrado"); raise SystemExit(0)
+          eng=res[0]['id']
+          with open(reports[0],'rb') as f:
+              r=requests.post(f"{DD_BASE_URL}/api/v2/import-scan/", headers=hdr,
+                    data={"scan_type":"ZAP Scan","engagement":eng,"active":True,"verified":False,
+                          "scan_date":TODAY,"tags":"zap,dast,baseline","close_old_findings":True,
+                          "minimum_severity":"Medium","endpoint_to_add":os.environ.get('DEFECTDOJO_APP_URL','')},
+                    files={"file":("zap-report.xml", f, "application/xml")}, timeout=60)
+          print(("OK" if r.status_code in (200,201) else "ERROR"), "ZAP→DD", r.status_code)
+          PYTHON
+
+      - name: ZAP report como artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zap-report
+          path: |
+            *zap*.xml
+            report_xml.xml
+          retention-days: 30
+          if-no-files-found: ignore

@@ -1,0 +1,47 @@
+# ============================================================
+# localstack/docker-compose.yml
+# Levantar LocalStack con todos los servicios necesarios
+#
+# Uso:
+#   cd localstack/
+#   docker compose up -d
+#   # Esperar ~20s y luego ejecutar:
+#   ./setup-and-plan.sh
+#
+# Para parar:
+#   docker compose down
+# ============================================================
+
+version: "3.8"
+
+services:
+  localstack:
+    container_name: localstack-main
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"        # endpoint principal
+      - "4510-4559:4510-4559"  # servicios legacy
+    environment:
+      # Servicios necesarios para el plan de esta arquitectura
+      - SERVICES=ec2,rds,s3,kms,iam,secretsmanager,cloudwatch,logs,wafv2,elbv2,lambda,sns,apigateway,config,guardduty,scheduler,events,ssm,dynamodb,cloudtrail,acm,dlm
+      - DEFAULT_REGION=eu-west-1
+      - AWS_DEFAULT_REGION=eu-west-1
+      - DISABLE_CORS_CHECKS=1
+      - EAGER_SERVICE_LOADING=0
+      # Token pro (opcional — algunos servicios solo en pro)
+      # - LOCALSTACK_AUTH_TOKEN=<tu_token>
+      - DEBUG=0
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - "${LOCALSTACK_VOLUME_DIR:-./volume}:/var/lib/localstack"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+networks:
+  default:
+    name: localstack-network

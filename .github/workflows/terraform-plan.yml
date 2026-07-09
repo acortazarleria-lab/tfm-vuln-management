@@ -1,0 +1,161 @@
+# ============================================================
+# terraform-plan.yml
+# Trigger: push a develop + PR hacia main
+# Jobs: plan + drift detection + estimación costes (Infracost)
+# ============================================================
+
+name: Terraform Plan
+
+on:
+  push:
+    branches: [develop]
+    paths: ['**.tf', '**.tfvars']
+  pull_request:
+    branches: [main]
+    paths: ['**.tf', '**.tfvars']
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+env:
+  TF_VERSION: "1.7.5"
+  AWS_REGION: "eu-west-1"
+  TF_WORKING_DIR: "environments/prod"
+
+jobs:
+  plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TERRAFORM }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-actions-plan
+
+      - name: Terraform Init
+        run: terraform init -backend=true -reconfigure -input=false
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan \
+            -no-color \
+            -input=false \
+            -out=tfplan \
+            -var="acm_certificate_arn=${{ secrets.ACM_CERT_ARN }}" \
+            -var="alarm_email=${{ secrets.ALARM_EMAIL }}" \
+            -var="internal_domain=${{ secrets.INTERNAL_DOMAIN }}" \
+            2>&1 | tee /tmp/plan-output.txt
+
+          echo "PLAN_SUMMARY=$(grep -E '^Plan:|^No changes' /tmp/plan-output.txt | head -1)" \
+            >> "$GITHUB_ENV"
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        continue-on-error: true
+
+      - name: Drift Detection
+        id: drift
+        run: |
+          set +e
+          terraform plan \
+            -detailed-exitcode \
+            -refresh-only \
+            -no-color \
+            -input=false \
+            -var="acm_certificate_arn=${{ secrets.ACM_CERT_ARN }}" \
+            -var="alarm_email=${{ secrets.ALARM_EMAIL }}" \
+            -var="internal_domain=${{ secrets.INTERNAL_DOMAIN }}" \
+            2>&1 | tee /tmp/drift-output.txt
+
+          EXIT_CODE=$?
+          if [ $EXIT_CODE -eq 2 ]; then
+            echo "DRIFT_DETECTED=true" >> "$GITHUB_ENV"
+            echo "DRIFT DETECTADO: cambios manuales en infraestructura"
+          else
+            echo "DRIFT_DETECTED=false" >> "$GITHUB_ENV"
+            echo "Sin drift: infraestructura alineada con Terraform"
+          fi
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        continue-on-error: true
+
+      - name: Setup Infracost
+        uses: infracost/actions/setup@v2
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      - name: Infracost Cost Estimate
+        run: |
+          infracost breakdown \
+            --path ${{ env.TF_WORKING_DIR }} \
+            --format json \
+            --out-file /tmp/infracost.json \
+            --terraform-var "acm_certificate_arn=arn:aws:acm:eu-west-1:000000000000:certificate/placeholder" \
+            --terraform-var "alarm_email=placeholder@empresa.com" \
+            --terraform-var "internal_domain=empresa.internal"
+
+          infracost output \
+            --path /tmp/infracost.json \
+            --format table \
+            --out-file /tmp/infracost-table.txt
+
+          cat /tmp/infracost-table.txt
+        continue-on-error: true
+
+      - name: Comment PR — Plan + Drift + Costes
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.existsSync('/tmp/plan-output.txt')
+              ? fs.readFileSync('/tmp/plan-output.txt', 'utf8').slice(-3000)
+              : 'No disponible';
+            const drift = process.env.DRIFT_DETECTED === 'true';
+            const summary = process.env.PLAN_SUMMARY || 'Ver detalle';
+            const costs = fs.existsSync('/tmp/infracost-table.txt')
+              ? fs.readFileSync('/tmp/infracost-table.txt', 'utf8')
+              : 'No disponible';
+
+            const body = `## Terraform Plan
+
+            ${drift ? '**DRIFT DETECTADO** — cambios manuales en infraestructura' : 'Sin drift'}
+
+            **Resumen:** \`${summary}\`
+
+            <details><summary>Plan detallado</summary>
+
+            \`\`\`hcl
+            ${plan}
+            \`\`\`
+            </details>
+
+            <details><summary>Estimación costes (Infracost)</summary>
+
+            \`\`\`
+            ${costs}
+            \`\`\`
+            </details>
+
+            > Plan generado por GitHub Actions — requiere aprobación para apply
+            `;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });

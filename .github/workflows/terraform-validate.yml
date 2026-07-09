@@ -1,0 +1,318 @@
+# ============================================================
+# terraform-validate.yml
+# Trigger: PR hacia main/develop
+# Puertas de calidad de la IaC (fmt, validate, tflint, checkov)
+# + reporte de métricas de mantenibilidad (docs coverage, tests)
+#
+# CAMBIOS vs versión previa:
+#  - Alcance COMPLETO: validate corre sobre dev Y prod (matrix)
+#  - Se ELIMINA el envío de findings a DefectDojo (rompe la
+#    dependencia circular: el PR que despliega/repara DefectDojo
+#    ya no depende de DefectDojo para poder mergearse).
+#    El veredicto de merge lo dan gates locales por severidad;
+#    la telemetría va a GitHub Security (SARIF) + artifacts.
+#  - Se AÑADEN: TFLint (gate), terraform-docs + cobertura de
+#    documentación (reporte), scaffold de terraform test (reporte).
+#  - FIX: Checkov ahora emite SARIF real (antes subía un JSON
+#    como si fuera SARIF y ese paso fallaba siempre).
+#  - tfsec ELIMINADO (solapaba con Checkov/Trivy). Escáner IaC:
+#    Checkov (gate, aquí) + Trivy config (security-scan.yml).
+#
+# Well-Architected: Operational Excellence – shift-left security
+# ISO 27001: A.14.2.2 — control de cambios en el sistema
+# ============================================================
+
+name: Terraform Validate
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - '**.tf'
+      - '**.tfvars'
+      - '.github/workflows/terraform-*.yml'
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+
+env:
+  TF_VERSION: "1.7.5"
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # ── Job 1: Formato (repo completo, una sola vez) ─────────
+  format:
+    name: Format (repo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # GATE real: sin continue-on-error → un repo mal formateado
+      # bloquea el PR. -recursive desde la raíz cubre envs + modules.
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive -diff
+
+  # ── Job 2: Validate (TODOS los entornos) ─────────────────
+  validate:
+    name: Validate (${{ matrix.environment }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [dev, prod]
+    env:
+      TF_DIR: environments/${{ matrix.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # -backend=false: validate NO necesita backend remoto ni
+      # credenciales AWS. Elimina la dependencia de nube del gate.
+      - name: Terraform Init (sin backend)
+        run: terraform init -backend=false -input=false
+        working-directory: ${{ env.TF_DIR }}
+
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate -no-color
+        working-directory: ${{ env.TF_DIR }}
+
+      - name: Comment PR — Validate
+        uses: actions/github-script@v7
+        if: always() && github.event_name == 'pull_request'
+        with:
+          script: |
+            const env = '${{ matrix.environment }}';
+            const validate = '${{ steps.validate.outcome }}';
+            const icon = validate === 'success' ? 'OK' : 'FALLO';
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## Terraform Validate — \`${env}\`\n| Check | Estado |\n|---|---|\n| \`terraform validate\` | ${icon} |`
+            });
+
+  # ── Job 3: TFLint (gate, repo completo recursivo) ────────
+  tflint:
+    name: TFLint (repo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Config mínima: habilita el ruleset de AWS (detecta tipos de
+      # instancia inválidos, args deprecados, atributos inexistentes).
+      - name: Write .tflint.hcl
+        run: |
+          cat > .tflint.hcl <<'HCL'
+          plugin "terraform" {
+            enabled = true
+            preset  = "recommended"
+          }
+          plugin "aws" {
+            enabled = true
+            version = "0.31.0"
+            source  = "github.com/terraform-linters/tflint-ruleset-aws"
+          }
+          HCL
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      - name: TFLint init
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: tflint --init
+
+      # GATE real: findings de linting bloquean el PR.
+      - name: TFLint run (recursivo)
+        run: tflint --recursive --format compact
+
+  # ── Job 4: Documentación — cobertura (REPORTE) ───────────
+  docs-coverage:
+    name: Docs coverage (reporte)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install terraform-docs
+        run: |
+          curl -sSLo tf-docs.tar.gz \
+            https://terraform-docs.io/dl/v0.18.0/terraform-docs-v0.18.0-linux-amd64.tar.gz
+          tar -xzf tf-docs.tar.gz terraform-docs
+          chmod +x terraform-docs && sudo mv terraform-docs /usr/local/bin/
+
+      # Métrica 1: % de variables con `description`.
+      # Métrica 2: módulos con README.md (docs generadas) vs total.
+      # Se publica en el resumen del job; hoy es INFORMATIVO.
+      # Para convertirlo en gate: cambiar `exit 0` por `exit 1`
+      # cuando falten docs (ver comentario abajo).
+      - name: Calcular cobertura de documentación
+        run: |
+          set -euo pipefail
+          total_vars=$(grep -rhE '^variable ' modules/*/variables.tf | wc -l)
+          documented=$(awk '/^variable /{v=1} v&&/description/{print;v=0}' \
+                        modules/*/variables.tf | wc -l)
+          pct=$(( total_vars ? documented * 100 / total_vars : 0 ))
+
+          total_mods=$(find modules -maxdepth 1 -mindepth 1 -type d | wc -l)
+          with_readme=$(find modules -maxdepth 2 -name README.md | wc -l)
+
+          {
+            echo "## Cobertura de documentación (IaC)"
+            echo ""
+            echo "| Métrica | Valor |"
+            echo "|---|---|"
+            echo "| Variables con \`description\` | ${documented}/${total_vars} (${pct}%) |"
+            echo "| Módulos con README.md | ${with_readme}/${total_mods} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Cobertura variables: ${pct}% | READMEs: ${with_readme}/${total_mods}"
+
+          # --- Para hacerlo bloqueante (recomendado a futuro) ---
+          # UMBRAL=90
+          # if [ "$pct" -lt "$UMBRAL" ]; then
+          #   echo "Cobertura ${pct}% < ${UMBRAL}%"; exit 1
+          # fi
+          exit 0
+
+      # Comprueba drift entre código y docs generadas (por módulo).
+      # No bloquea todavía porque el repo aún no tiene READMEs.
+      - name: Check terraform-docs drift (informativo)
+        continue-on-error: true
+        run: |
+          for m in modules/*/; do
+            terraform-docs markdown table --output-file README.md \
+              --output-mode inject --output-check "$m" \
+              || echo "Docs desactualizadas o ausentes en $m"
+          done
+
+  # ── Job 5: terraform test — cobertura (REPORTE) ──────────
+  tf-test:
+    name: Terraform test (reporte)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # Ejecuta tests nativos si existen y reporta cobertura de módulos.
+      # Hoy el repo tiene 0 ficheros *.tftest.hcl → se reporta 0/N.
+      # Añade tests en modules/<x>/tests/*.tftest.hcl para subir la métrica.
+      - name: Ejecutar tests y calcular cobertura
+        run: |
+          set -uo pipefail
+          total_mods=$(find modules -maxdepth 1 -mindepth 1 -type d | wc -l)
+          tested=0
+          for m in modules/*/; do
+            if compgen -G "${m}**/*.tftest.hcl" > /dev/null; then
+              tested=$((tested+1))
+              echo "== terraform test en ${m} =="
+              (cd "$m" && terraform init -backend=false -input=false && terraform test) || exit 1
+            fi
+          done
+          {
+            echo "## Cobertura de tests (IaC)"
+            echo "| Métrica | Valor |"
+            echo "|---|---|"
+            echo "| Módulos con tests | ${tested}/${total_mods} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Módulos con tests: ${tested}/${total_mods}"
+
+  # ── Job 6: Checkov (gate local + SARIF real + artifact) ──
+  # Único escáner IaC del gate. tfsec eliminado por solapamiento;
+  # la cobertura IaC se reparte entre Checkov (aquí) y Trivy config
+  # (security-scan.yml → GitHub Security).
+  checkov:
+    name: Checkov IaC Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Checkov
+        run: pip install checkov==3.2.0
+
+      # -d . cubre TODO el repo (dev, prod y modules) en una pasada.
+      # Emitimos SARIF + JSON + CLI. --soft-fail aquí para SIEMPRE
+      # producir los reportes; el veredicto lo pone el gate posterior.
+      - name: Run Checkov
+        run: |
+          checkov -d . \
+            --framework terraform \
+            -o cli -o sarif -o json \
+            --output-file-path console,checkov_out \
+            --soft-fail \
+            --skip-check CKV_AWS_2,CKV_AWS_130
+
+      # GATE local por severidad (rompe la dependencia de DefectDojo).
+      # Falla el PR si hay findings HIGH/CRITICAL. Configurable.
+      - name: Security gate (HIGH/CRITICAL)
+        env:
+          BLOCK_SEVERITIES: "HIGH,CRITICAL"
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          block = {s.strip().upper() for s in os.environ["BLOCK_SEVERITIES"].split(",")}
+          with open("checkov_out/results_json.json") as f:
+              data = json.load(f)
+          data = data if isinstance(data, list) else [data]
+          blocking, by_sev = [], {}
+          for report in data:
+              for c in report.get("results", {}).get("failed_checks", []):
+                  sev = (c.get("severity") or "UNKNOWN").upper()
+                  by_sev[sev] = by_sev.get(sev, 0) + 1
+                  if sev in block:
+                      blocking.append(f"{c.get('check_id')} @ {c.get('file_path')}")
+          print("Findings por severidad:", by_sev or "ninguno")
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a") as s:
+                  s.write("## Checkov — findings por severidad\n")
+                  s.write("| Severidad | Nº |\n|---|---|\n")
+                  for k, v in sorted(by_sev.items()):
+                      s.write(f"| {k} | {v} |\n")
+          if blocking:
+              print(f"\nGATE FALLIDO: {len(blocking)} findings bloqueantes ({', '.join(block)})")
+              for b in blocking[:50]:
+                  print("  -", b)
+              sys.exit(1)
+          print("\nGATE OK: sin findings en", block)
+          PY
+
+      # FIX del bug: se sube el SARIF REAL, no el JSON.
+      - name: Upload SARIF → GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: checkov_out/results_sarif.sarif
+          category: checkov
+
+      # Fallback: los findings sobreviven aunque no haya DefectDojo.
+      - name: Upload findings como artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: checkov-findings
+          path: checkov_out/
+          retention-days: 30
