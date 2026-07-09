@@ -1,3 +1,27 @@
+# ============================================================
+# terraform-apply-localstack.yml
+# Variante de terraform-apply.yml que corre contra LocalStack
+# en vez de AWS real. NO requiere secrets de AWS ni cuenta real.
+#
+# Objetivo: validar que el flujo init → plan → apply → outputs
+# se ejecuta sin errores mecánicos (referencias entre módulos,
+# nombres de recursos, variables requeridas, etc.).
+#
+# LIMITACIONES A TENER EN CUENTA (documentar en la memoria si se
+# usa como evidencia):
+#  - LocalStack Community NO soporta ALB, WAF, GuardDuty, AWS
+#    Config ni CloudTrail (son features de LocalStack Pro). El
+#    apply fallará o creará esos recursos como no-op según el
+#    servicio.
+#  - La "instancia EC2" de LocalStack es una simulación de API,
+#    no una máquina real: el user_data.sh NUNCA se ejecuta. No
+#    hay DefectDojo real corriendo, así que el health check y la
+#    notificación SNS se han eliminado de este workflow — no
+#    tiene sentido comprobarlos aquí.
+#  - Sirve como evidencia de que el CÓDIGO es aplicable end-to-end
+#    a nivel de API, no como evidencia de despliegue funcional.
+# ============================================================
+
 name: Terraform Apply (LocalStack, sin coste)
 
 on:
@@ -59,9 +83,15 @@ jobs:
             sleep 3
           done
 
-      - name: Generar override de endpoints LocalStack
+      - name: Generar override de endpoints y backend LocalStack
         run: |
           cat > ${{ env.TF_WORKING_DIR }}/localstack_override.tf <<'EOF'
+          terraform {
+            backend "local" {
+              path = "terraform.tfstate"
+            }
+          }
+
           provider "aws" {
             access_key = "test"
             secret_key = "test"
@@ -99,8 +129,8 @@ jobs:
           }
           EOF
 
-      - name: Terraform Init (sin backend remoto)
-        run: terraform init -backend=false -input=false
+      - name: Terraform Init (backend local sobreescrito, sin S3 real)
+        run: terraform init -reconfigure -input=false
         working-directory: ${{ env.TF_WORKING_DIR }}
 
       - name: Terraform Plan
