@@ -110,7 +110,7 @@ jobs:
       - name: Generate CycloneDX SBOM
         run: |
           pip install cyclonedx-bom requests
-          cyclonedx-py environment --output-format JSON --outfile /tmp/project-sbom.json
+          cyclonedx-py environment --output-format JSON --output-file /tmp/project-sbom.json
 
       - name: DTrack SBOM como artifact
         uses: actions/upload-artifact@v4
