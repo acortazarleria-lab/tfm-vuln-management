@@ -9,7 +9,8 @@ output "defectdojo_dashboard_url" {
 }
 
 output "defectdojo_internal_url" {
-  value = module.defectdojo.internal_url
+  value     = module.defectdojo.internal_url
+  sensitive = true
 }
 
 output "defectdojo_instance_id" {
@@ -25,7 +26,8 @@ output "alb_dns_name" {
 }
 
 output "webhook_url" {
-  value = module.defectdojo.webhook_url
+  value     = module.defectdojo.webhook_url
+  sensitive = true
 }
 
 output "cloudwatch_dashboard_url" {

@@ -23,7 +23,8 @@ output "admin_secret_arn" {
 }
 
 output "internal_url" {
-  value = aws_ssm_parameter.defectdojo_url.value
+  value     = aws_ssm_parameter.defectdojo_url.value
+  sensitive = true
 }
 
 output "dashboard_url" {
@@ -39,7 +40,8 @@ output "metrics_lambda_arn" {
 }
 
 output "webhook_url" {
-  value = aws_ssm_parameter.webhook_url.value
+  value     = aws_ssm_parameter.webhook_url.value
+  sensitive = true
 }
 
 output "webhook_lambda_arn" {
