@@ -1,27 +1,3 @@
-# ============================================================
-# terraform-apply-localstack.yml
-# Variante de terraform-apply.yml que corre contra LocalStack
-# en vez de AWS real. NO requiere secrets de AWS ni cuenta real.
-#
-# Objetivo: validar que el flujo init → plan → apply → outputs
-# se ejecuta sin errores mecánicos (referencias entre módulos,
-# nombres de recursos, variables requeridas, etc.).
-#
-# LIMITACIONES A TENER EN CUENTA (documentar en la memoria si se
-# usa como evidencia):
-#  - LocalStack Community NO soporta ALB, WAF, GuardDuty, AWS
-#    Config ni CloudTrail (son features de LocalStack Pro). El
-#    apply fallará o creará esos recursos como no-op según el
-#    servicio.
-#  - La "instancia EC2" de LocalStack es una simulación de API,
-#    no una máquina real: el user_data.sh NUNCA se ejecuta. No
-#    hay DefectDojo real corriendo, así que el health check y la
-#    notificación SNS se han eliminado de este workflow — no
-#    tiene sentido comprobarlos aquí.
-#  - Sirve como evidencia de que el CÓDIGO es aplicable end-to-end
-#    a nivel de API, no como evidencia de despliegue funcional.
-# ============================================================
-
 name: Terraform Apply (LocalStack, sin coste)
 
 on:
@@ -124,10 +100,40 @@ jobs:
               secretsmanager = "http://localhost:4566"
               sns            = "http://localhost:4566"
               ssm            = "http://localhost:4566"
+              sts            = "http://localhost:4566"
               wafv2          = "http://localhost:4566"
             }
           }
           EOF
+
+      - name: Generar override de AMI dentro del módulo defectdojo
+        # Un override en environments/dev NO puede sobreescribir un
+        # data source declarado dentro de modules/defectdojo — cada
+        # módulo resuelve sus propios *_override.tf en su propio
+        # directorio. Por eso este override va físicamente dentro
+        # de modules/defectdojo/, no en environments/dev/.
+        run: |
+          cat > modules/defectdojo/localstack_override.tf <<'EOF'
+          data "aws_ami" "ubuntu_22" {
+            most_recent = true
+            owners      = ["self"]
+
+            filter {
+              name   = "name"
+              values = ["ubuntu-jammy-localstack-fake*"]
+            }
+          }
+          EOF
+
+      - name: Registrar AMI falsa en LocalStack
+        run: |
+          aws ec2 register-image \
+            --endpoint-url http://localhost:4566 \
+            --name "ubuntu-jammy-localstack-fake-20260101" \
+            --root-device-name /dev/sda1 \
+            --virtualization-type hvm \
+            --architecture x86_64 \
+            --block-device-mappings "DeviceName=/dev/sda1,Ebs={VolumeSize=8}"
 
       - name: Terraform Init (backend local sobreescrito, sin S3 real)
         run: terraform init -reconfigure -input=false
