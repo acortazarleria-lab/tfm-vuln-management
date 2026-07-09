@@ -1,184 +1,106 @@
-# ============================================================
-# terraform-apply.yml
-# Trigger: push a main (tras merge de PR aprobado)
-# Jobs: apply con aprobación manual en prod
-# ISO 27001: A.14.2.2 — control de cambios en producción
-# ============================================================
-
-name: Terraform Apply
-
+name: Terraform Apply (LocalStack, sin coste)
+ 
 on:
-  push:
-    branches: [main]
-    paths: ['**.tf', '**.tfvars']
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Entorno a desplegar'
+        description: 'Entorno a aplicar contra LocalStack'
         required: true
-        default: 'prod'
+        default: 'dev'
         type: choice
-        options: [prod, dev]
-      confirm:
-        description: 'Confirmar apply en producción (escribe CONFIRM)'
-        required: true
-
+        options: [dev, prod]
+ 
 permissions:
   contents: read
-  id-token: write
-
+ 
 env:
   TF_VERSION: "1.7.5"
-  AWS_REGION: "eu-west-1"
-
+  TF_WORKING_DIR: environments/${{ inputs.environment }}
+ 
 jobs:
-  # ── Job 1: Plan previo (siempre) ─────────────────────────
-  pre-apply-plan:
-    name: Pre-Apply Plan
+  apply-localstack:
+    name: Terraform Apply contra LocalStack
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    environment: prod-plan
-
+    timeout-minutes: 30
+ 
+    services:
+      localstack:
+        image: localstack/localstack:3.0
+        ports: ["4566:4566"]
+        env:
+          SERVICES: ec2,s3,iam,rds,lambda,kms,logs,sts,dynamodb,secretsmanager,cloudwatch
+        options: >-
+          --health-cmd "curl -sf http://localhost:4566/_localstack/health"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+ 
+    # Credenciales ficticias: LocalStack no valida su contenido,
+    # solo necesita que existan variables con este nombre.
+    env:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: eu-west-1
+ 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
+ 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TERRAFORM }}
-          aws-region: ${{ env.AWS_REGION }}
-          role-session-name: github-actions-apply
-
-      - name: Terraform Init
-        run: terraform init -backend=true -reconfigure -input=false
-        working-directory: environments/prod
-
-      - name: Terraform Plan (pre-apply)
+ 
+      - name: Esperar a que LocalStack esté listo
+        run: |
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:4566/_localstack/health && break
+            echo "Esperando LocalStack ($i/20)..."
+            sleep 3
+          done
+ 
+      - name: Instalar override de endpoints LocalStack
+        run: cp localstack/localstack.override.tf ${{ env.TF_WORKING_DIR }}/localstack_override.tf
+ 
+      - name: Terraform Init (sin backend remoto)
+        run: terraform init -backend=false -input=false
+        working-directory: ${{ env.TF_WORKING_DIR }}
+ 
+      - name: Terraform Plan
         run: |
           terraform plan \
             -no-color \
             -input=false \
             -out=tfplan \
-            -var="acm_certificate_arn=${{ secrets.ACM_CERT_ARN }}" \
-            -var="alarm_email=${{ secrets.ALARM_EMAIL }}" \
-            -var="internal_domain=${{ secrets.INTERNAL_DOMAIN }}"
-        working-directory: environments/prod
-
-      - name: Upload plan artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: tfplan
-          path: environments/prod/tfplan
-          retention-days: 1
-
-  # ── Job 2: Aprobación manual requerida ───────────────────
-  manual-approval:
-    name: Aprobación Manual
-    runs-on: ubuntu-latest
-    needs: pre-apply-plan
-    environment: prod-apply
-    # Configurar en: Settings → Environments → prod-apply
-    # → Required reviewers: equipo-seguridad
-
-    steps:
-      - name: Confirmación recibida
+            -var="acm_certificate_arn=arn:aws:acm:eu-west-1:000000000000:certificate/test-fake-cert" \
+            -var="alarm_email=test@empresa.com" \
+            -var="internal_domain=empresa.internal"
+        working-directory: ${{ env.TF_WORKING_DIR }}
+ 
+      - name: Terraform Apply (contra LocalStack)
         run: |
-          echo "Apply aprobado por: ${{ github.actor }}"
-          echo "Timestamp: $(date -u)"
-
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            if [[ "${{ inputs.confirm }}" != "CONFIRM" ]]; then
-              echo "Debes escribir CONFIRM para aplicar en producción"
-              exit 1
-            fi
-          fi
-
-  # ── Job 3: Apply ──────────────────────────────────────────
-  apply:
-    name: Terraform Apply
-    runs-on: ubuntu-latest
-    needs: [pre-apply-plan, manual-approval]
-    timeout-minutes: 60
-    environment: prod-apply
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TERRAFORM }}
-          aws-region: ${{ env.AWS_REGION }}
-          role-session-name: github-actions-apply-prod
-
-      - name: Terraform Init
-        run: terraform init -backend=true -reconfigure -input=false
-        working-directory: environments/prod
-
-      - name: Download plan artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: tfplan
-          path: environments/prod
-
-      - name: Terraform Apply
-        run: |
-          terraform apply \
-            -no-color \
-            -input=false \
-            -auto-approve \
-            tfplan \
+          terraform apply -no-color -input=false -auto-approve tfplan \
             2>&1 | tee /tmp/apply-output.txt
-        working-directory: environments/prod
-
+        working-directory: ${{ env.TF_WORKING_DIR }}
+ 
       - name: Extraer outputs
         if: success()
-        run: |
-          terraform output -json > /tmp/tf-outputs.json
-          echo "DefectDojo URL: $(terraform output -raw defectdojo_dashboard_url 2>/dev/null || echo 'N/A')"
-        working-directory: environments/prod
-
-      - name: Health Check DefectDojo
-        if: success()
-        env:
-          DD_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
-          DD_BASE_URL: ${{ secrets.DEFECTDOJO_URL }}
-        run: |
-          echo "Esperando 60s para que DefectDojo arranque..."
-          sleep 60
-
-          HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
-            "$DD_BASE_URL/api/v2/users/?format=json" \
-            -H "Authorization: Token $DD_API_KEY" || echo "000")
-
-          if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "401" ]]; then
-            echo "DefectDojo responde (HTTP $HTTP_CODE)"
-          else
-            echo "DefectDojo no responde (HTTP $HTTP_CODE)"
-            exit 1
-          fi
-
-      - name: Notificar resultado Apply
+        run: terraform output -json > /tmp/tf-outputs.json
+        working-directory: ${{ env.TF_WORKING_DIR }}
+ 
+      - name: Subir evidencia (log de apply + outputs)
         if: always()
-        env:
-          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: localstack-apply-evidence
+          path: |
+            /tmp/apply-output.txt
+            /tmp/tf-outputs.json
+          retention-days: 30
+ 
+      - name: Aviso de limitaciones
+        if: always()
         run: |
-          STATUS="${{ job.status }}"
-
-          aws sns publish \
-            --topic-arn "${{ secrets.SNS_ALERTS_ARN }}" \
-            --message "Terraform Apply $STATUS en prod | Actor: ${{ github.actor }} | Commit: ${{ github.sha }}" \
-            --subject "[$STATUS] Terraform Apply prod" \
-            || true
+          echo "::notice::Este apply se ejecutó contra LocalStack Community." 
+          echo "::notice::ALB, WAF, GuardDuty, Config y CloudTrail no están soportados en Community y pueden aparecer como fallidos o simulados."
+          echo "::notice::No hay DefectDojo real corriendo: esta evidencia valida el código, no el despliegue funcional."
