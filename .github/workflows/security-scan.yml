@@ -4,26 +4,6 @@
 # Escaneo continuo de la PLATAFORMA (producto DefectDojo):
 #   Trivy (SCA/vuln), Dependency-Track (SBOM), Semgrep (SAST),
 #   OWASP ZAP (DAST).
-#
-# CAMBIOS vs versión previa (rompen la circularidad):
-#  - Los findings de IaC (Trivy config sobre Terraform) YA NO van a
-#    DefectDojo: la IaC de la plataforma no se reporta contra la
-#    plataforma que ella misma despliega. Van a GitHub Security
-#    (SARIF) + artifact. (La IaC ya la gobierna terraform-validate.yml.)
-#  - CIRCULARIDAD CERO: el scan de la IMAGEN de DefectDojo también
-#    va ahora a GitHub Security (SARIF), NO a DefectDojo. La
-#    plataforma ya no reporta ninguna de sus propias vulnerabilidades
-#    (imagen + IaC) contra sí misma.
-#  - Lo que SÍ sigue en DefectDojo (best-effort + artifact fallback):
-#    SCA de dependencias del código (filesystem), Dependency-Track,
-#    Semgrep SAST y ZAP DAST contra la app en ejecución. Es el
-#    propósito legítimo del producto y NO es autorreferencial a su
-#    propia construcción. Si DefectDojo está caído, el escaneo no
-#    rompe y los findings sobreviven como artifact.
-#
-#  Reparto de destinos:
-#    GitHub Security ← IaC (Trivy config) + imagen DefectDojo
-#    DefectDojo      ← SCA código + DTrack + SAST + DAST (best-effort)
 # ============================================================
 
 name: Security Scan → DefectDojo
@@ -31,8 +11,6 @@ name: Security Scan → DefectDojo
 on:
   push:
     branches: [main, develop]
-  schedule:
-    - cron: '0 6 * * 1-5'
   workflow_dispatch:
 
 permissions:
@@ -84,7 +62,6 @@ jobs:
           sarif_file: /tmp/trivy-image.sarif
           category: trivy-image
 
-      # IaC: ahora en formato SARIF, NO CycloneDX/JSON hacia DD.
       - name: Trivy — IaC scan (SARIF, no DefectDojo)
         uses: aquasecurity/trivy-action@master
         with:
@@ -95,7 +72,6 @@ jobs:
           severity: 'MEDIUM,HIGH,CRITICAL'
           exit-code: '0'
 
-      # Los findings de IaC van a GitHub Security, NO a DefectDojo.
       - name: Upload IaC SARIF → GitHub Security
         uses: github/codeql-action/upload-sarif@v3
         if: always()
@@ -108,7 +84,6 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - run: pip install requests boto3
 
-      # Fallback: los findings sobreviven aunque DefectDojo esté caído.
       - name: Trivy findings como artifact
         uses: actions/upload-artifact@v4
         if: always()
@@ -137,27 +112,12 @@ jobs:
           pip install cyclonedx-bom requests
           cyclonedx-py environment --output-format JSON --outfile /tmp/project-sbom.json
 
-      - name: Upload SBOM → Dependency-Track API
-        env:
-          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
-          DTRACK_URL: ${{ secrets.DTRACK_URL }}
-        run: |
-          PROJECT_UUID="${{ vars.DTRACK_PROJECT_APP_UUID }}"
-          SBOM_B64=$(base64 -w 0 /tmp/project-sbom.json)
-          curl -sf -X PUT "$DTRACK_URL/api/v1/bom" \
-            -H "X-Api-Key: $DTRACK_API_KEY" -H "Content-Type: application/json" \
-            -d "{\"project\": \"$PROJECT_UUID\", \"bom\": \"$SBOM_B64\"}"
-          echo "SBOM subido a Dependency-Track"
-
-      - name: Wait for DTrack analysis
-        run: sleep 60
-
       - name: DTrack SBOM como artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: dtrack-sbom
-          path: /tmp/dtrack-sbom.json
+          path: /tmp/project-sbom.json
           retention-days: 30
 
   # ── Job 3: SAST — Semgrep ────────────────────────────────
@@ -186,32 +146,6 @@ jobs:
         with:
           sarif_file: semgrep.sarif
           category: semgrep
-
-      - name: Upload Semgrep → DefectDojo (best-effort)
-        if: always()
-        continue-on-error: true
-        env:
-          DD_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
-          DD_BASE_URL: ${{ secrets.DEFECTDOJO_URL }}
-        run: |
-          pip install requests -q
-          python3 << 'PYTHON'
-          import os, datetime, requests
-          if not os.path.exists('semgrep.sarif'):
-              print("No se encontró semgrep.sarif"); raise SystemExit(0)
-          DD_TOKEN=os.environ['DD_API_KEY']; DD_BASE_URL=os.environ['DD_BASE_URL']
-          TODAY=datetime.date.today().isoformat(); BRANCH=os.environ.get('GITHUB_REF_NAME','main')
-          hdr={"Authorization": f"Token {DD_TOKEN}"}
-          eng=requests.get(f"{DD_BASE_URL}/api/v2/engagements/", headers=hdr,
-                params={"name":"SAST Continuous Scan","status":"In Progress"}, timeout=20).json()['results'][0]['id']
-          with open('semgrep.sarif','rb') as f:
-              r=requests.post(f"{DD_BASE_URL}/api/v2/import-scan/", headers=hdr,
-                    data={"scan_type":"SARIF","engagement":eng,"active":True,"verified":False,
-                          "scan_date":TODAY,"tags":f"semgrep,sast,{BRANCH}",
-                          "close_old_findings":True,"minimum_severity":"Medium"},
-                    files={"file":("semgrep.sarif", f, "application/json")}, timeout=60)
-          print(("OK" if r.status_code in (200,201) else "ERROR"), "Semgrep→DD", r.status_code)
-          PYTHON
 
       - name: Semgrep SARIF como artifact
         uses: actions/upload-artifact@v4
