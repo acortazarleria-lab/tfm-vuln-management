@@ -1,44 +1,56 @@
-# ============================================================
-# compliance-report.yml
-# Genera informe compliance mensual y lo sube a S3
-# Trigger: primer día de cada mes a las 08:00 CET
-# ============================================================
-
 name: Compliance Report
-
+ 
 on:
-  schedule:
-    - cron: '0 7 1 * *' # 08:00 CET el día 1 de cada mes
+  # schedule:
+  #   - cron: '0 7 1 * *' # 08:00 CET el día 1 de cada mes — desactivado, ver nota arriba
   workflow_dispatch:
-
+ 
 env:
   AWS_REGION: "eu-west-1"
-
+ 
 jobs:
+  # ── Job puerta: comprueba si hay credenciales AWS reales ──
+  check-aws-credentials:
+    name: Comprobar credenciales AWS
+    runs-on: ubuntu-latest
+    outputs:
+      has-credentials: ${{ steps.check.outputs.has-credentials }}
+    steps:
+      - id: check
+        run: |
+          if [ -n "${{ secrets.AWS_ROLE_TERRAFORM }}" ]; then
+            echo "has-credentials=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has-credentials=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::AWS_ROLE_TERRAFORM no está configurado (sin cuenta AWS real desplegada). El informe de cumplimiento se omite."
+          fi
+ 
   generate-report:
     name: Generar informe ISO 27001 + GDPR
     runs-on: ubuntu-latest
     timeout-minutes: 15
-
+    needs: check-aws-credentials
+    if: needs.check-aws-credentials.outputs.has-credentials == 'true'
+ 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
+ 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TERRAFORM }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: github-actions-compliance
-
+ 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
+ 
       - name: Install dependencies
         run: pip install boto3 requests
-
+ 
       - name: Generate compliance report
         run: |
           python3 scripts/generate-compliance-report.py \
@@ -46,7 +58,7 @@ jobs:
             --environment prod \
             --region ${{ env.AWS_REGION }} \
             --output compliance-$(date +%Y%m).json
-
+ 
       - name: Upload report → S3
         env:
           S3_LOGS_BUCKET: ${{ secrets.S3_LOGS_BUCKET }}
@@ -55,12 +67,13 @@ jobs:
           aws s3 cp compliance-$(date +%Y%m).json \
             "s3://${S3_LOGS_BUCKET}/compliance-reports/${DATE}/" \
             --sse aws:kms
-
+ 
           echo "Informe subido a S3"
-
+ 
       - name: Upload report artifact
         uses: actions/upload-artifact@v4
         with:
           name: compliance-report-${{ github.run_id }}
           path: compliance-*.json
           retention-days: 90
+ 
