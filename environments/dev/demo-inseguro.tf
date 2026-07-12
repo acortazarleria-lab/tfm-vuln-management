@@ -6,11 +6,11 @@ resource "aws_security_group" "demo_inseguro" {
   vpc_id      = module.networking.vpc_id
 
   ingress {
-    description = "SSH abierto - a corregir en este mismo PR"
+    description = "SSH restringido a la subred de computo"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [local.cidrs.private_compute]
   }
 
   tags = local.common_tags
