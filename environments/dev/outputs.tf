@@ -1,7 +1,6 @@
 # ============================================================
 # environments/prod/outputs.tf
 # Outputs expuestos a nivel de entorno — usados por CI/CD
-# (health checks post-apply) y por scripts de configuración
 # ============================================================
 
 output "defectdojo_dashboard_url" {
