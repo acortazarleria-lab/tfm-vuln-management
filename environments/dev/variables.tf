@@ -1,6 +1,6 @@
 # ============================================================
 # variables.tf (raíz)
-# Variables globales compartidas entre todos los entornos
+# Variables globales compartidas entre todos los entornos.
 # ============================================================
 
 variable "project" {
