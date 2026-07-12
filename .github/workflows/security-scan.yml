@@ -1,6 +1,6 @@
 # ============================================================
 # security-scan.yml
-# Trigger: push a main/develop + schedule diario
+# Trigger: pull_request hacia main/develop + ejecución manual
 # Escaneo continuo de la PLATAFORMA (producto DefectDojo):
 #   Trivy (SCA/vuln), Dependency-Track (SBOM), Semgrep (SAST),
 #   OWASP ZAP (DAST).
@@ -9,7 +9,7 @@
 name: Security Scan → DefectDojo
 
 on:
-  push:
+  pull_request:
     branches: [main, develop]
   workflow_dispatch:
 
@@ -122,7 +122,7 @@ jobs:
 
   # ── Job 3: SAST — Semgrep ────────────────────────────────
   sast-semgrep:
-    name: Semgrep SAST 
+    name: Semgrep SAST
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -175,7 +175,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: check-target
-    if: (github.ref == 'refs/heads/main' || github.event_name == 'schedule') && needs.check-target.outputs.has-target == 'true'
+    if: (github.base_ref == 'main' || github.event_name == 'workflow_dispatch') && needs.check-target.outputs.has-target == 'true'
     steps:
       - uses: actions/checkout@v4
  
