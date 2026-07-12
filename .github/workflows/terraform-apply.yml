@@ -1,29 +1,5 @@
-# ============================================================
-# terraform-apply-localstack.yml
-# Variante de terraform-apply.yml que corre contra LocalStack
-# en vez de AWS real. NO requiere secrets de AWS ni cuenta real.
-#
-# Objetivo: validar que el flujo init → plan → apply → outputs
-# se ejecuta sin errores mecánicos (referencias entre módulos,
-# nombres de recursos, variables requeridas, etc.).
-#
-# LIMITACIONES A TENER EN CUENTA (documentar en la memoria si se
-# usa como evidencia):
-#  - LocalStack Community NO soporta ALB, WAF, GuardDuty, AWS
-#    Config ni CloudTrail (son features de LocalStack Pro). El
-#    apply fallará o creará esos recursos como no-op según el
-#    servicio.
-#  - La "instancia EC2" de LocalStack es una simulación de API,
-#    no una máquina real: el user_data.sh NUNCA se ejecuta. No
-#    hay DefectDojo real corriendo, así que el health check y la
-#    notificación SNS se han eliminado de este workflow — no
-#    tiene sentido comprobarlos aquí.
-#  - Sirve como evidencia de que el CÓDIGO es aplicable end-to-end
-#    a nivel de API, no como evidencia de despliegue funcional.
-# ============================================================
-
 name: Terraform Apply (LocalStack, sin coste)
-
+ 
 on:
   workflow_dispatch:
     inputs:
@@ -33,49 +9,49 @@ on:
         default: 'dev'
         type: choice
         options: [dev, prod]
-
+ 
 permissions:
   contents: read
-
+ 
 env:
   TF_VERSION: "1.7.5"
   TF_WORKING_DIR: environments/${{ inputs.environment }}
-
+ 
 jobs:
   apply-localstack:
     name: Terraform Apply contra LocalStack
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
+ 
     services:
       localstack:
         image: localstack/localstack:3.0
         ports: ["4566:4566"]
         env:
-          SERVICES: ec2,s3,iam,rds,lambda,kms,logs,sts,dynamodb,secretsmanager,cloudwatch,apigateway,scheduler,ssm,events,config,cloudtrail,guardduty,wafv2,elbv2
+          SERVICES: ec2,s3,iam,rds,lambda,kms,logs,sts,dynamodb,secretsmanager,cloudwatch,apigateway,scheduler,ssm,events,config,cloudtrail,guardduty,wafv2,elbv2,sns
         options: >-
           --health-cmd "curl -sf http://localhost:4566/_localstack/health"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
-
+ 
     # Credenciales ficticias: LocalStack no valida su contenido,
     # solo necesita que existan variables con este nombre.
     env:
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
       AWS_DEFAULT_REGION: eu-west-1
-
+ 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
+ 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
-
+ 
       - name: Esperar a que LocalStack esté listo
         run: |
           for i in $(seq 1 20); do
@@ -83,7 +59,7 @@ jobs:
             echo "Esperando LocalStack ($i/20)..."
             sleep 3
           done
-
+ 
       - name: Generar override de endpoints y backend LocalStack
         run: |
           cat > ${{ env.TF_WORKING_DIR }}/localstack_override.tf <<'EOF'
@@ -92,17 +68,17 @@ jobs:
               path = "terraform.tfstate"
             }
           }
-
+ 
           provider "aws" {
             access_key = "test"
             secret_key = "test"
-
+ 
             skip_credentials_validation = true
             skip_metadata_api_check     = true
             skip_requesting_account_id  = true
-
+ 
             s3_use_path_style = true
-
+ 
             endpoints {
               acm            = "http://localhost:4566"
               apigateway     = "http://localhost:4566"
@@ -130,7 +106,7 @@ jobs:
             }
           }
           EOF
-
+ 
       - name: Generar override de AMI dentro del módulo defectdojo
         # Un override en environments/dev NO puede sobreescribir un
         # data source declarado dentro de modules/defectdojo — cada
@@ -142,14 +118,14 @@ jobs:
           data "aws_ami" "ubuntu_22" {
             most_recent = true
             owners      = ["self"]
-
+ 
             filter {
               name   = "name"
               values = ["ubuntu-jammy-localstack-fake*"]
             }
           }
           EOF
-
+ 
       - name: Registrar AMI falsa en LocalStack
         run: |
           aws ec2 register-image \
@@ -159,11 +135,22 @@ jobs:
             --virtualization-type hvm \
             --architecture x86_64 \
             --block-device-mappings "DeviceName=/dev/sda1,Ebs={VolumeSize=8}"
-
+ 
       - name: Terraform Init (backend local sobreescrito, sin S3 real)
         run: terraform init -reconfigure -input=false
         working-directory: ${{ env.TF_WORKING_DIR }}
-
+ 
+      - name: Construir Lambda layer de dependencias Python
+        # Documentado en README.md, sección "2. Construir la Lambda
+        # layer" — automatizado aquí para que el apply no falle por
+        # falta del zip.
+        run: |
+          mkdir -p modules/defectdojo/lambda/layer/python
+          pip install requests -t modules/defectdojo/lambda/layer/python/ \
+            --platform manylinux2014_x86_64 --only-binary=:all: --python-version 3.12
+          cd modules/defectdojo/lambda/layer
+          zip -r python-deps.zip python/
+ 
       - name: Terraform Plan
         run: |
           terraform plan \
@@ -174,18 +161,18 @@ jobs:
             -var="alarm_email=test@empresa.com" \
             -var="internal_domain=empresa.internal"
         working-directory: ${{ env.TF_WORKING_DIR }}
-
+ 
       - name: Terraform Apply (contra LocalStack)
         run: |
           terraform apply -no-color -input=false -auto-approve tfplan \
             2>&1 | tee /tmp/apply-output.txt
         working-directory: ${{ env.TF_WORKING_DIR }}
-
+ 
       - name: Extraer outputs
         if: success()
         run: terraform output -json > /tmp/tf-outputs.json
         working-directory: ${{ env.TF_WORKING_DIR }}
-
+ 
       - name: Subir evidencia (log de apply + outputs)
         if: always()
         uses: actions/upload-artifact@v4
@@ -195,10 +182,3 @@ jobs:
             /tmp/apply-output.txt
             /tmp/tf-outputs.json
           retention-days: 30
-
-      - name: Aviso de limitaciones
-        if: always()
-        run: |
-          echo "::notice::Este apply se ejecutó contra LocalStack Community." 
-          echo "::notice::ALB, WAF, GuardDuty, Config y CloudTrail no están soportados en Community y pueden aparecer como fallidos o simulados."
-          echo "::notice::No hay DefectDojo real corriendo: esta evidencia valida el código, no el despliegue funcional."
