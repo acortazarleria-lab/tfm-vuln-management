@@ -12,11 +12,6 @@ variable "environment" {
   type        = string
 }
 
-variable "aws_region" {
-  description = "Región AWS"
-  type        = string
-}
-
 variable "common_tags" {
   description = "Tags comunes aplicados a todos los recursos"
   type        = map(string)

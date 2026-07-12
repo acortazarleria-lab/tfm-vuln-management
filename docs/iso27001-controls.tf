@@ -10,6 +10,10 @@
 # y como entrada de scripts/generate-compliance-report.py.
 # ============================================================
 
+terraform {
+  required_version = ">= 1.7.0, < 2.0.0"
+}
+
 locals {
   iso27001_controls = {
 
@@ -304,4 +308,11 @@ locals {
       status = "COMPLIANT"
     }
   }
+}
+
+# Salida documental: consumida por scripts/generate-compliance-report.py
+# (y evita el falso positivo terraform_unused_declarations de TFLint).
+output "iso27001_controls" {
+  description = "Mapeo de controles ISO 27001:2022 a recursos Terraform"
+  value       = local.iso27001_controls
 }

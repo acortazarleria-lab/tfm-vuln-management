@@ -7,14 +7,6 @@
 # SCOPE REDUCIDO: una instancia, una base de datos (defectdojo)
 # ============================================================
 
-data "aws_caller_identity" "current" {}
-data "aws_region" "current" {}
-
-locals {
-  account_id = data.aws_caller_identity.current.account_id
-  region     = data.aws_region.current.name
-}
-
 # -----------------------------------------------------------
 # Subnet Group — RDS solo en subnet privada datos
 # -----------------------------------------------------------

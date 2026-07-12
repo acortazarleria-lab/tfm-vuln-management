@@ -44,11 +44,6 @@ variable "config_role_arn" {
   type        = string
 }
 
-variable "lambda_integration_role_arn" {
-  description = "ARN del role IAM de las Lambdas de integración (módulo security)"
-  type        = string
-}
-
 variable "common_tags" {
   type = map(string)
 }

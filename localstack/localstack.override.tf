@@ -11,6 +11,19 @@
 # NO commitear — está en .gitignore
 # ============================================================
 
+# Constraints exigidos por TFLint; en un fichero *_override.tf estos
+# bloques se FUSIONAN con los del root module (mismos valores → no-op).
+terraform {
+  required_version = ">= 1.7.0, < 2.0.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.50"
+    }
+  }
+}
+
 provider "aws" {
   # Credenciales ficticias para LocalStack
   access_key = "test"

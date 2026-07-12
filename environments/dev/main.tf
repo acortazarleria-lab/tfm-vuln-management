@@ -13,7 +13,6 @@ module "security" {
 
   project     = var.project
   environment = var.environment
-  aws_region  = var.aws_region
   alarm_email = var.alarm_email
   common_tags = local.common_tags
 }
@@ -48,7 +47,6 @@ module "storage" {
   environment         = var.environment
   kms_s3_arn          = module.security.kms_s3_arn
   defectdojo_role_arn = module.security.defectdojo_role_arn
-  retention           = local.retention
   common_tags         = local.common_tags
 }
 
@@ -95,17 +93,16 @@ module "defectdojo" {
 module "monitoring" {
   source = "../../modules/monitoring"
 
-  project                     = var.project
-  environment                 = var.environment
-  alb_arn_suffix              = module.networking.alb_arn_suffix
-  waf_web_acl_name            = module.networking.waf_web_acl_name
-  defectdojo_instance_id      = module.defectdojo.instance_id
-  rds_identifier              = module.database.rds_identifier
-  s3_logs_bucket              = module.storage.logs_bucket_id
-  kms_cloudwatch_arn          = module.security.kms_cloudwatch_arn
-  sns_alerts_arn              = module.security.sns_alerts_arn
-  config_role_arn             = module.security.config_role_arn
-  lambda_integration_role_arn = module.security.lambda_integration_role_arn
-  retention_days              = local.retention.hot_days
-  common_tags                 = local.common_tags
+  project                = var.project
+  environment            = var.environment
+  alb_arn_suffix         = module.networking.alb_arn_suffix
+  waf_web_acl_name       = module.networking.waf_web_acl_name
+  defectdojo_instance_id = module.defectdojo.instance_id
+  rds_identifier         = module.database.rds_identifier
+  s3_logs_bucket         = module.storage.logs_bucket_id
+  kms_cloudwatch_arn     = module.security.kms_cloudwatch_arn
+  sns_alerts_arn         = module.security.sns_alerts_arn
+  config_role_arn        = module.security.config_role_arn
+  retention_days         = local.retention.hot_days
+  common_tags            = local.common_tags
 }
