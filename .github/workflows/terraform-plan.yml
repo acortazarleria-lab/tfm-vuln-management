@@ -1,11 +1,5 @@
-# ============================================================
-# terraform-plan.yml
-# Trigger: push a develop + PR hacia main
-# Jobs: plan + drift detection + estimación costes (Infracost)
-# ============================================================
-
 name: Terraform Plan
-
+ 
 on:
   push:
     branches: [develop]
@@ -13,43 +7,131 @@ on:
   pull_request:
     branches: [main]
     paths: ['**.tf', '**.tfvars']
-
+ 
 permissions:
   contents: read
   pull-requests: write
-  id-token: write
-
+ 
 env:
   TF_VERSION: "1.7.5"
-  AWS_REGION: "eu-west-1"
   TF_WORKING_DIR: "environments/prod"
-
+ 
 jobs:
   plan:
     name: Terraform Plan
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
+ 
+    services:
+      localstack:
+        image: localstack/localstack:3.0
+        ports: ["4566:4566"]
+        env:
+          SERVICES: ec2,s3,iam,rds,lambda,kms,logs,sts,dynamodb,secretsmanager,cloudwatch,apigateway,scheduler,ssm,events,config,cloudtrail,guardduty,wafv2,elbv2,sns
+        options: >-
+          --health-cmd "curl -sf http://localhost:4566/_localstack/health"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+ 
+    env:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: eu-west-1
+ 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
+ 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
-
-      - name: Configure AWS Credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TERRAFORM }}
-          aws-region: ${{ env.AWS_REGION }}
-          role-session-name: github-actions-plan
-
-      - name: Terraform Init
-        run: terraform init -backend=true -reconfigure -input=false
+          terraform_wrapper: false
+ 
+      - name: Esperar a que LocalStack esté listo
+        run: |
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:4566/_localstack/health && break
+            echo "Esperando LocalStack ($i/20)..."
+            sleep 3
+          done
+ 
+      - name: Generar override de endpoints y backend LocalStack
+        run: |
+          cat > ${{ env.TF_WORKING_DIR }}/localstack_override.tf <<'EOF'
+          terraform {
+            backend "local" {
+              path = "terraform.tfstate"
+            }
+          }
+ 
+          provider "aws" {
+            access_key = "test"
+            secret_key = "test"
+ 
+            skip_credentials_validation = true
+            skip_metadata_api_check     = true
+            skip_requesting_account_id  = true
+ 
+            s3_use_path_style = true
+ 
+            endpoints {
+              acm            = "http://localhost:4566"
+              apigateway     = "http://localhost:4566"
+              cloudwatch     = "http://localhost:4566"
+              cloudwatchlogs = "http://localhost:4566"
+              cloudtrail     = "http://localhost:4566"
+              config         = "http://localhost:4566"
+              dlm            = "http://localhost:4566"
+              dynamodb       = "http://localhost:4566"
+              ec2            = "http://localhost:4566"
+              elbv2          = "http://localhost:4566"
+              events         = "http://localhost:4566"
+              guardduty      = "http://localhost:4566"
+              iam            = "http://localhost:4566"
+              kms            = "http://localhost:4566"
+              lambda         = "http://localhost:4566"
+              rds            = "http://localhost:4566"
+              s3             = "http://localhost:4566"
+              scheduler      = "http://localhost:4566"
+              secretsmanager = "http://localhost:4566"
+              sns            = "http://localhost:4566"
+              ssm            = "http://localhost:4566"
+              sts            = "http://localhost:4566"
+              wafv2          = "http://localhost:4566"
+            }
+          }
+          EOF
+ 
+      - name: Generar override de AMI dentro del módulo defectdojo
+        run: |
+          cat > modules/defectdojo/localstack_override.tf <<'EOF'
+          data "aws_ami" "ubuntu_22" {
+            most_recent = true
+            owners      = ["self"]
+ 
+            filter {
+              name   = "name"
+              values = ["ubuntu-jammy-localstack-fake*"]
+            }
+          }
+          EOF
+ 
+      - name: Registrar AMI falsa en LocalStack
+        run: |
+          aws ec2 register-image \
+            --endpoint-url http://localhost:4566 \
+            --name "ubuntu-jammy-localstack-fake-20260101" \
+            --root-device-name /dev/sda1 \
+            --virtualization-type hvm \
+            --architecture x86_64 \
+            --block-device-mappings "DeviceName=/dev/sda1,Ebs={VolumeSize=8}"
+ 
+      - name: Terraform Init (backend local, sin S3 real)
+        run: terraform init -reconfigure -input=false
         working-directory: ${{ env.TF_WORKING_DIR }}
-
+ 
       - name: Terraform Plan
         id: plan
         run: |
@@ -57,18 +139,21 @@ jobs:
             -no-color \
             -input=false \
             -out=tfplan \
-            -var="acm_certificate_arn=${{ secrets.ACM_CERT_ARN }}" \
-            -var="alarm_email=${{ secrets.ALARM_EMAIL }}" \
-            -var="internal_domain=${{ secrets.INTERNAL_DOMAIN }}" \
+            -var="acm_certificate_arn=arn:aws:acm:eu-west-1:000000000000:certificate/test-fake-cert" \
+            -var="alarm_email=test@empresa.com" \
+            -var="internal_domain=empresa.internal" \
             2>&1 | tee /tmp/plan-output.txt
-
+ 
           echo "PLAN_SUMMARY=$(grep -E '^Plan:|^No changes' /tmp/plan-output.txt | head -1)" \
             >> "$GITHUB_ENV"
         working-directory: ${{ env.TF_WORKING_DIR }}
         continue-on-error: true
-
+ 
       - name: Drift Detection
         id: drift
+        # NOTA: contra un LocalStack recién arrancado y vacío nunca
+        # habrá drift real — este paso solo valida que el comando
+        # se ejecuta sin errores, no aporta señal real de desviación.
         run: |
           set +e
           terraform plan \
@@ -76,11 +161,11 @@ jobs:
             -refresh-only \
             -no-color \
             -input=false \
-            -var="acm_certificate_arn=${{ secrets.ACM_CERT_ARN }}" \
-            -var="alarm_email=${{ secrets.ALARM_EMAIL }}" \
-            -var="internal_domain=${{ secrets.INTERNAL_DOMAIN }}" \
+            -var="acm_certificate_arn=arn:aws:acm:eu-west-1:000000000000:certificate/test-fake-cert" \
+            -var="alarm_email=test@empresa.com" \
+            -var="internal_domain=empresa.internal" \
             2>&1 | tee /tmp/drift-output.txt
-
+ 
           EXIT_CODE=$?
           if [ $EXIT_CODE -eq 2 ]; then
             echo "DRIFT_DETECTED=true" >> "$GITHUB_ENV"
@@ -91,12 +176,12 @@ jobs:
           fi
         working-directory: ${{ env.TF_WORKING_DIR }}
         continue-on-error: true
-
+ 
       - name: Setup Infracost
         uses: infracost/actions/setup@v2
         with:
           api-key: ${{ secrets.INFRACOST_API_KEY }}
-
+ 
       - name: Infracost Cost Estimate
         run: |
           infracost breakdown \
@@ -106,15 +191,15 @@ jobs:
             --terraform-var "acm_certificate_arn=arn:aws:acm:eu-west-1:000000000000:certificate/placeholder" \
             --terraform-var "alarm_email=placeholder@empresa.com" \
             --terraform-var "internal_domain=empresa.internal"
-
+ 
           infracost output \
             --path /tmp/infracost.json \
             --format table \
             --out-file /tmp/infracost-table.txt
-
+ 
           cat /tmp/infracost-table.txt
         continue-on-error: true
-
+ 
       - name: Comment PR — Plan + Drift + Costes
         uses: actions/github-script@v7
         if: github.event_name == 'pull_request'
@@ -129,33 +214,34 @@ jobs:
             const costs = fs.existsSync('/tmp/infracost-table.txt')
               ? fs.readFileSync('/tmp/infracost-table.txt', 'utf8')
               : 'No disponible';
-
-            const body = `## Terraform Plan
-
+ 
+            const body = `## Terraform Plan (LocalStack)
+ 
             ${drift ? '**DRIFT DETECTADO** — cambios manuales en infraestructura' : 'Sin drift'}
-
+ 
             **Resumen:** \`${summary}\`
-
+ 
             <details><summary>Plan detallado</summary>
-
+ 
             \`\`\`hcl
             ${plan}
             \`\`\`
             </details>
-
+ 
             <details><summary>Estimación costes (Infracost)</summary>
-
+ 
             \`\`\`
             ${costs}
             \`\`\`
             </details>
-
-            > Plan generado por GitHub Actions — requiere aprobación para apply
+ 
+            > Plan generado contra LocalStack (sin cuenta AWS real) — requiere aprobación para apply
             `;
-
+ 
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
               body
             });
+ 
