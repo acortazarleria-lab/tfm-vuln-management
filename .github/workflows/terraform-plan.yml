@@ -1,12 +1,10 @@
 name: Terraform Plan
  
 on:
-  push:
-    branches: [develop]
-    paths: ['**.tf', '**.tfvars']
   pull_request:
-    branches: [main]
+    branches: [main, develop]
     paths: ['**.tf', '**.tfvars']
+  workflow_dispatch:
  
 permissions:
   contents: read

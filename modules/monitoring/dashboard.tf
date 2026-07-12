@@ -13,11 +13,11 @@ resource "aws_cloudwatch_dashboard" "main" {
 
       # ── Fila 1: Estado general ──────────────────────────
       {
-        type       = "metric"
-        x          = 0
-        y          = 0
-        width      = 6
-        height     = 6
+        type   = "metric"
+        x      = 0
+        y      = 0
+        width  = 6
+        height = 6
         properties = {
           title  = "Findings activos por severidad"
           view   = "singleValue"
@@ -32,11 +32,11 @@ resource "aws_cloudwatch_dashboard" "main" {
       },
 
       {
-        type       = "metric"
-        x          = 6
-        y          = 0
-        width      = 6
-        height     = 6
+        type   = "metric"
+        x      = 6
+        y      = 0
+        width  = 6
+        height = 6
         properties = {
           title  = "Findings fuera de SLA"
           view   = "singleValue"
@@ -49,11 +49,11 @@ resource "aws_cloudwatch_dashboard" "main" {
       },
 
       {
-        type       = "metric"
-        x          = 12
-        y          = 0
-        width      = 6
-        height     = 6
+        type   = "metric"
+        x      = 12
+        y      = 0
+        width  = 6
+        height = 6
         properties = {
           title  = "EC2 DefectDojo"
           view   = "timeSeries"
@@ -67,11 +67,11 @@ resource "aws_cloudwatch_dashboard" "main" {
       },
 
       {
-        type       = "metric"
-        x          = 18
-        y          = 0
-        width      = 6
-        height     = 6
+        type   = "metric"
+        x      = 18
+        y      = 0
+        width  = 6
+        height = 6
         properties = {
           title  = "ALB: tráfico y errores"
           view   = "timeSeries"
@@ -86,11 +86,11 @@ resource "aws_cloudwatch_dashboard" "main" {
 
       # ── Fila 2: Base de datos + red ─────────────────────
       {
-        type       = "metric"
-        x          = 0
-        y          = 6
-        width      = 8
-        height     = 6
+        type   = "metric"
+        x      = 0
+        y      = 6
+        width  = 8
+        height = 6
         properties = {
           title  = "RDS PostgreSQL — conexiones y CPU"
           view   = "timeSeries"
@@ -103,11 +103,11 @@ resource "aws_cloudwatch_dashboard" "main" {
       },
 
       {
-        type       = "metric"
-        x          = 8
-        y          = 6
-        width      = 8
-        height     = 6
+        type   = "metric"
+        x      = 8
+        y      = 6
+        width  = 8
+        height = 6
         properties = {
           title  = "RDS — almacenamiento libre"
           view   = "timeSeries"
@@ -119,11 +119,11 @@ resource "aws_cloudwatch_dashboard" "main" {
       },
 
       {
-        type       = "metric"
-        x          = 16
-        y          = 6
-        width      = 8
-        height     = 6
+        type   = "metric"
+        x      = 16
+        y      = 6
+        width  = 8
+        height = 6
         properties = {
           title  = "WAF — permitidas vs bloqueadas"
           view   = "timeSeries"
@@ -138,11 +138,11 @@ resource "aws_cloudwatch_dashboard" "main" {
       # ── Fila 3: Findings por categoría — expandido manualmente ─────────
       # (Terraform no soporta for-expressions dentro de jsonencode)
       {
-        type       = "metric"
-        x          = 0
-        y          = 12
-        width      = 12
-        height     = 6
+        type   = "metric"
+        x      = 0
+        y      = 12
+        width  = 12
+        height = 6
         properties = {
           title  = "Findings críticos por categoría"
           view   = "bar"
@@ -158,11 +158,11 @@ resource "aws_cloudwatch_dashboard" "main" {
       },
 
       {
-        type       = "metric"
-        x          = 12
-        y          = 12
-        width      = 12
-        height     = 6
+        type   = "metric"
+        x      = 12
+        y      = 12
+        width  = 12
+        height = 6
         properties = {
           title  = "Errores sync / enrichment Lambda"
           view   = "timeSeries"

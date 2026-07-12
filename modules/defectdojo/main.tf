@@ -6,12 +6,10 @@
 # Categorías: SAST, DAST, SCA, Infraestructura, Código
 # ============================================================
 
-data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
 locals {
-  account_id = data.aws_caller_identity.current.account_id
-  region     = data.aws_region.current.name
+  region = data.aws_region.current.name
 }
 
 # -----------------------------------------------------------
@@ -111,9 +109,9 @@ resource "aws_instance" "defectdojo" {
   root_block_device {
     volume_type           = "gp3"
     volume_size           = 30
-    encrypted              = true
-    kms_key_id             = var.kms_key_arn
-    delete_on_termination  = true
+    encrypted             = true
+    kms_key_id            = var.kms_key_arn
+    delete_on_termination = true
 
     tags = merge(var.common_tags, {
       Name = "${var.project}-ebs-defectdojo-os-${var.environment}"
@@ -123,13 +121,13 @@ resource "aws_instance" "defectdojo" {
   # Volumen datos: media files DefectDojo + SBOMs archivados
   ebs_block_device {
     device_name           = "/dev/sdb"
-    volume_type            = "gp3"
-    volume_size             = 50
-    encrypted               = true
-    kms_key_id              = var.kms_key_arn
-    delete_on_termination   = false
-    iops                    = 3000
-    throughput              = 125
+    volume_type           = "gp3"
+    volume_size           = 50
+    encrypted             = true
+    kms_key_id            = var.kms_key_arn
+    delete_on_termination = false
+    iops                  = 3000
+    throughput            = 125
 
     tags = merge(var.common_tags, {
       Name    = "${var.project}-ebs-defectdojo-data-${var.environment}"
@@ -140,17 +138,17 @@ resource "aws_instance" "defectdojo" {
   user_data = base64encode(templatefile(
     "${path.module}/templates/defectdojo-install.sh.tpl",
     {
-      project             = var.project
-      environment         = var.environment
-      region              = local.region
-      db_secret_arn       = var.db_secret_arn
-      admin_secret_arn    = aws_secretsmanager_secret.defectdojo_admin.arn
-      api_key_secret_arn  = aws_secretsmanager_secret.defectdojo_api_key.arn
-      s3_reports_bucket   = var.s3_bucket_id
-      defectdojo_version  = var.defectdojo_version
-      db_host             = var.db_endpoint.host
-      db_port             = var.db_endpoint.port
-      db_name             = var.db_endpoint.dbname
+      project            = var.project
+      environment        = var.environment
+      region             = local.region
+      db_secret_arn      = var.db_secret_arn
+      admin_secret_arn   = aws_secretsmanager_secret.defectdojo_admin.arn
+      api_key_secret_arn = aws_secretsmanager_secret.defectdojo_api_key.arn
+      s3_reports_bucket  = var.s3_bucket_id
+      defectdojo_version = var.defectdojo_version
+      db_host            = var.db_endpoint.host
+      db_port            = var.db_endpoint.port
+      db_name            = var.db_endpoint.dbname
     }
   ))
 

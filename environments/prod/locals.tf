@@ -20,26 +20,16 @@ locals {
     ManagedBy   = "terraform"
   }
 
-  # Convención de naming: {project}-{recurso}-{env}
-  name_prefix = "${var.project}-${var.environment}"
-
   # CIDRs por capa (segmentación de red)
   # ISO 27001: A.13.1.3 — segregación en redes
   cidrs = {
     vpc             = "10.0.0.0/16"
-    public          = "10.0.1.0/24"   # ALB interno (AZ-a)
-    private_compute = "10.0.2.0/24"   # EC2: DefectDojo (AZ-a)
-    private_data    = "10.0.3.0/24"   # RDS (AZ-a activa)
-    private_lambda  = "10.0.4.0/24"   # Lambdas integración + CI/CD runners
-    private_data_b  = "10.0.5.0/24"   # RDS subnet group standby (AZ-b, solo para cumplir req. AWS)
-    public_b        = "10.0.6.0/24"   # ALB subnet standby (AZ-b, solo para cumplir req. AWS)
-  }
-
-  # Horario apagado automático (CET laboral) — solo dev
-  # Ahorro: ~60% horas EC2
-  schedule = {
-    shutdown = "cron(0 19 ? * MON-FRI *)" # 20:00 CET (19 UTC+1)
-    startup  = "cron(0 7 ? * MON-FRI *)"  # 08:00 CET (07 UTC+1)
+    public          = "10.0.1.0/24" # ALB interno (AZ-a)
+    private_compute = "10.0.2.0/24" # EC2: DefectDojo (AZ-a)
+    private_data    = "10.0.3.0/24" # RDS (AZ-a activa)
+    private_lambda  = "10.0.4.0/24" # Lambdas integración + CI/CD runners
+    private_data_b  = "10.0.5.0/24" # RDS subnet group standby (AZ-b, solo para cumplir req. AWS)
+    public_b        = "10.0.6.0/24" # ALB subnet standby (AZ-b, solo para cumplir req. AWS)
   }
 
   # Retención logs por capa

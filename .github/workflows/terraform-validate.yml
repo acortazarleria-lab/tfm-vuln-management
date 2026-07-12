@@ -1,27 +1,3 @@
-# ============================================================
-# terraform-validate.yml
-# Trigger: PR hacia main/develop
-# Puertas de calidad de la IaC (fmt, validate, tflint, checkov)
-# + reporte de métricas de mantenibilidad (docs coverage, tests)
-#
-# CAMBIOS vs versión previa:
-#  - Alcance COMPLETO: validate corre sobre dev Y prod (matrix)
-#  - Se ELIMINA el envío de findings a DefectDojo (rompe la
-#    dependencia circular: el PR que despliega/repara DefectDojo
-#    ya no depende de DefectDojo para poder mergearse).
-#    El veredicto de merge lo dan gates locales por severidad;
-#    la telemetría va a GitHub Security (SARIF) + artifacts.
-#  - Se AÑADEN: TFLint (gate), terraform-docs + cobertura de
-#    documentación (reporte), scaffold de terraform test (reporte).
-#  - FIX: Checkov ahora emite SARIF real (antes subía un JSON
-#    como si fuera SARIF y ese paso fallaba siempre).
-#  - tfsec ELIMINADO (solapaba con Checkov/Trivy). Escáner IaC:
-#    Checkov (gate, aquí) + Trivy config (security-scan.yml).
-#
-# Well-Architected: Operational Excellence – shift-left security
-# ISO 27001: A.14.2.2 — control de cambios en el sistema
-# ============================================================
-
 name: Terraform Validate
 
 on:
@@ -256,14 +232,26 @@ jobs:
       # -d . cubre TODO el repo (dev, prod y modules) en una pasada.
       # Emitimos SARIF + JSON + CLI. --soft-fail aquí para SIEMPRE
       # producir los reportes; el veredicto lo pone el gate posterior.
+      #
+      # FIX: con varios formatos, --output-file-path debe ser UN directorio.
+      # La forma anterior "console,checkov_out" empareja posicionalmente
+      # cli→console y sarif→fichero literal "checkov_out" (y json se queda
+      # sin destino), por lo que checkov_out/results_sarif.sarif nunca
+      # existía. Con un único directorio, checkov escribe dentro
+      # results_cli.txt, results_sarif.sarif y results_json.json.
       - name: Run Checkov
         run: |
+          mkdir -p checkov_out
           checkov -d . \
             --framework terraform \
             -o cli -o sarif -o json \
-            --output-file-path console,checkov_out \
+            --output-file-path checkov_out \
             --soft-fail \
             --skip-check CKV_AWS_2,CKV_AWS_130
+          echo "── Ficheros generados ──"
+          ls -la checkov_out
+          echo "── Resumen CLI ──"
+          cat checkov_out/results_cli.txt || true
 
       # GATE local por severidad (rompe la dependencia de DefectDojo).
       # Falla el PR si hay findings HIGH/CRITICAL. Configurable.
