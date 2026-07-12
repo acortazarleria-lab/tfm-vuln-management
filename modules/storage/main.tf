@@ -256,7 +256,7 @@ data "aws_iam_policy_document" "logs_bucket_policy" {
       type        = "Service"
       identifiers = ["config.amazonaws.com"]
     }
-    actions   = ["s3:PutObject", "s3:GetBucketAcl"]
+    actions = ["s3:PutObject", "s3:GetBucketAcl"]
     resources = [
       aws_s3_bucket.logs.arn,
       "${aws_s3_bucket.logs.arn}/aws-config/*"
@@ -275,7 +275,7 @@ data "aws_iam_policy_document" "logs_bucket_policy" {
       type        = "Service"
       identifiers = ["cloudtrail.amazonaws.com"]
     }
-    actions   = ["s3:PutObject", "s3:GetBucketAcl"]
+    actions = ["s3:PutObject", "s3:GetBucketAcl"]
     resources = [
       aws_s3_bucket.logs.arn,
       "${aws_s3_bucket.logs.arn}/cloudtrail/*"
@@ -602,7 +602,7 @@ data "aws_iam_policy_document" "backups_bucket_policy" {
       type        = "*"
       identifiers = ["*"]
     }
-    actions   = ["s3:DeleteObject", "s3:DeleteBucket"]
+    actions = ["s3:DeleteObject", "s3:DeleteBucket"]
     resources = [
       aws_s3_bucket.backups.arn,
       "${aws_s3_bucket.backups.arn}/*"

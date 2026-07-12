@@ -168,7 +168,7 @@ resource "aws_api_gateway_rest_api" "webhook" {
   description = "Receptor webhooks DefectDojo"
 
   endpoint_configuration {
-    types            = ["PRIVATE"]
+    types = ["PRIVATE"]
     # VPC Endpoint requerido para API Gateway PRIVATE
     vpc_endpoint_ids = [aws_vpc_endpoint.execute_api.id]
   }

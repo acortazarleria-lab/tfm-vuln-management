@@ -72,7 +72,7 @@ resource "aws_subnet" "private_data" {
 # solo satisface el requisito estructural del servicio.
 resource "aws_subnet" "private_data_b" {
   vpc_id            = aws_vpc.main.id
-  cidr_block        = var.private_data_cidr_b  # 10.0.5.0/24
+  cidr_block        = var.private_data_cidr_b # 10.0.5.0/24
   availability_zone = "${var.aws_region}b"
 
   tags = merge(var.common_tags, {
